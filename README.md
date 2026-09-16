@@ -167,4 +167,4 @@ comments in the source:
 
 ## License
 
-MIT. See [LICENSE-MIT](LICENSE-MIT).
+MIT. See [LICENSE](LICENSE).
