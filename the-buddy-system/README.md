@@ -151,6 +151,29 @@ buddy.free_memblock(&mb).unwrap();
 assert_eq!(buddy.nr_free(), 62);
 ```
 
+Memblocks usually live in a `static` behind a lock. `free_memblock` only
+needs a shared borrow, so no mutable reference is required — the guard
+dereferences to `Memblock` and `&guard` coerces to `&Memblock`:
+
+```rust
+static MEMBLOCK: Mutex<Memblock<usize, 16>> = Mutex::new(Memblock::new());
+
+let memblock = MEMBLOCK.lock().unwrap();
+buddy.free_memblock(&memblock).unwrap();
+```
+
+If the memblock lock should not be held while the allocator runs, snapshot
+the ranges and feed them afterwards with `Buddy::free_ranges`:
+
+```rust
+let ranges: Vec<_> = MEMBLOCK
+    .lock()
+    .unwrap()
+    .free_mem_ranges(MemblockFlags::NONE)
+    .collect();
+buddy.free_ranges(ranges).unwrap();
+```
+
 [`Buddy::free_memblock`]: https://docs.rs/the-buddy-system/latest/the_buddy_system/buddy/struct.Buddy.html
 [`the-memblock`]: https://crates.io/crates/the-memblock
 

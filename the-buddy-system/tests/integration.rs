@@ -147,3 +147,54 @@ fn custom_address_type_works_end_to_end() {
     assert_eq!(buddy.nr_free(), PAGES);
     buddy.validate().unwrap();
 }
+
+#[test]
+fn free_memblock_from_a_locked_static() {
+    // As in a kernel: the boot allocator lives in a static behind a lock,
+    // so there is no `&mut Memblock` to take.
+    static MEMBLOCK: Mutex<Memblock<usize, 16>> = Mutex::new(Memblock::new());
+
+    MEMBLOCK
+        .lock()
+        .unwrap()
+        .add(BASE, 32 * PS, MemblockFlags::NONE)
+        .unwrap();
+
+    let mut pages = vec![Page::EMPTY; PAGES];
+    let mut buddy = Buddy::<usize, MAX_ORDER>::new(BASE, PS, &mut pages).unwrap();
+
+    // The guard dereferences to `Memblock`, and a shared borrow is all
+    // `free_memblock` needs.
+    let memblock = MEMBLOCK.lock().unwrap();
+    buddy.free_memblock(&memblock).unwrap();
+    assert_eq!(buddy.nr_free(), 32);
+    buddy.validate().unwrap();
+}
+
+#[test]
+fn free_ranges_can_snapshot_before_releasing_the_memblock_lock() {
+    static MEMBLOCK: Mutex<Memblock<usize, 16>> = Mutex::new(Memblock::new());
+
+    MEMBLOCK
+        .lock()
+        .unwrap()
+        .add(BASE, 32 * PS, MemblockFlags::NONE)
+        .unwrap();
+
+    // Snapshot the ranges while the memblock lock is held...
+    let ranges = {
+        let memblock = MEMBLOCK.lock().unwrap();
+        let mut ranges = Vec::new();
+        for range in memblock.free_mem_ranges(MemblockFlags::NONE) {
+            ranges.push(range);
+        }
+        ranges
+    };
+
+    // ...then feed the allocator with the lock already released.
+    let mut pages = vec![Page::EMPTY; PAGES];
+    let mut buddy = Buddy::<usize, MAX_ORDER>::new(BASE, PS, &mut pages).unwrap();
+    buddy.free_ranges(ranges).unwrap();
+    assert_eq!(buddy.nr_free(), 32);
+    buddy.validate().unwrap();
+}

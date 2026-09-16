@@ -30,7 +30,12 @@ All notable changes to this project are documented in this file.
   widening of indices, so 32-bit targets with wider physical address types
   never truncate addresses.
 - `free_memblock` boot handoff that frees the `memblock` free memory
-  ranges into the allocator (`memblock_free_all`).
+  ranges into the allocator (`memblock_free_all`). It needs only a shared
+  borrow, so a memblock kept in a `static` behind a lock can be passed
+  straight from its guard.
+- `free_ranges` for feeding a pre-collected list of ranges, for example a
+  snapshot of the memblock free ranges taken before the memblock lock is
+  released.
 - `validate()` invariant checker covering free list integrity, block
   alignment, the page and block accounting, and the coalescing canonical
   form.

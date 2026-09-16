@@ -623,6 +623,44 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         Ok(())
     }
 
+    /// Frees each `[start, end)` range in the iterator, exactly like
+    /// calling [`Buddy::free_range`] for every range in turn.
+    ///
+    /// Useful for callers that hold a list of ranges instead of a live
+    /// source, for example a snapshot of
+    /// [`Memblock::free_mem_ranges`] taken while the memblock lock was
+    /// held, so that the lock can be released before the allocator is
+    /// touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidFree`] if any range overlaps memory that is
+    /// already free or in use.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use the_buddy_system::Buddy;
+    /// use the_buddy_system::Page;
+    ///
+    /// let mut pages = [Page::EMPTY; 64];
+    /// let mut buddy = Buddy::<usize, 4>::new(0, 0x1000, &mut pages).unwrap();
+    ///
+    /// buddy.free_ranges([(0usize, 0x10_000)]).unwrap();
+    /// assert_eq!(buddy.nr_free(), 16);
+    /// ```
+    ///
+    /// [`Memblock::free_mem_ranges`]: the_memblock::memblock::Memblock::free_mem_ranges
+    pub fn free_ranges<I>(&mut self, ranges: I) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = (A, A)>,
+    {
+        for (start, end) in ranges {
+            self.free_range(start, end)?;
+        }
+        Ok(())
+    }
+
     /// Adds the block at `idx` to the free lists, merging with free
     /// buddies until no larger block can be formed.
     ///
@@ -979,6 +1017,26 @@ mod tests {
         buddy.free_range((PAGES - 1) * PS, 2 * PAGES * PS).unwrap();
         assert_eq!(buddy.nr_free(), 1);
         buddy.validate().unwrap();
+    }
+
+    #[test]
+    fn free_ranges_feeds_multiple_ranges() {
+        let mut pages = [Page::EMPTY; PAGES];
+        let mut buddy = arena(&mut pages);
+
+        buddy
+            .free_ranges([(0usize, PS), (2 * PS, 4 * PS)])
+            .unwrap();
+        assert_eq!(buddy.nr_free(), 3);
+        assert_eq!(buddy.nr_free_blocks(0), Some(1));
+        assert_eq!(buddy.nr_free_blocks(1), Some(1));
+        buddy.validate().unwrap();
+
+        // An empty iterator is a no-op.
+        buddy
+            .free_ranges(core::iter::empty::<(usize, usize)>())
+            .unwrap();
+        assert_eq!(buddy.nr_free(), 3);
     }
 
     #[test]
