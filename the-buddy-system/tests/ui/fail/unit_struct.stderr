@@ -1,0 +1,7 @@
+error: `#[derive(PageFrame)]` only supports tuple structs with a single unnamed field, e.g. `struct Addr(u64)`
+ --> tests/ui/fail/unit_struct.rs:3:10
+  |
+3 | #[derive(PageFrame)]
+  |          ^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `PageFrame` (in Nightly builds, run with -Z macro-backtrace for more info)

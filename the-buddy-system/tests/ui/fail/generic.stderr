@@ -1,0 +1,5 @@
+error: `#[derive(PageFrame)]` does not support generic types
+ --> tests/ui/fail/generic.rs:4:15
+  |
+4 | struct Generic<T>(T);
+  |               ^^^

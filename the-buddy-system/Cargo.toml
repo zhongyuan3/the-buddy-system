@@ -1,0 +1,20 @@
+[package]
+name = "the-buddy-system"
+version = "0.1.0"
+edition = "2024"
+description = "A no_std reimplementation of the Linux kernel's buddy page allocator"
+license = "MIT"
+repository = "https://github.com/zhongyuan3/the-buddy-system"
+readme = "README.md"
+documentation = "https://docs.rs/the-buddy-system"
+keywords = ["no-std", "memory-allocator", "buddy-allocator", "physical-memory"]
+categories = ["no-std", "memory-management"]
+rust-version = "1.85"
+
+[dependencies]
+bitflags = "2.13.0"
+the-buddy-system-derive = { path = "../the-buddy-system-derive", version = "0.1.0" }
+the-memblock = { path = "../../the-memblock/the-memblock", version = "0.2.0" }
+
+[dev-dependencies]
+trybuild = "1"

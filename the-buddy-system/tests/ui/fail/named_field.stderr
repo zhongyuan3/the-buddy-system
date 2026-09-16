@@ -1,0 +1,8 @@
+error: `#[derive(PageFrame)]` only supports tuple structs with a single unnamed field, e.g. `struct Addr(u64)`
+ --> tests/ui/fail/named_field.rs:4:14
+  |
+4 |   struct Named {
+  |  ______________^
+5 | |     value: usize,
+6 | | }
+  | |_^

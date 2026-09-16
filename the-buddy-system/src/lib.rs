@@ -40,6 +40,11 @@
 //! addresses are never narrowed to `usize`; only page offsets relative to
 //! the arena base are, through a checked conversion.
 //!
+//! The [`PageFrame`] trait is implemented for every unsigned primitive;
+//! the [`#[derive(PageFrame)]`](crate::PageFrame) macro transparently
+//! implements it, together with the supertraits it requires, for
+//! single-field wrapper types such as `struct Addr(u64)`.
+//!
 //! # Kernel references
 //!
 //! - `mm/page_alloc.c`: `__free_one_page`, `__rmqueue_smallest`,
@@ -72,6 +77,8 @@ pub use crate::error::Error;
 pub use crate::page::Page;
 pub use crate::page::PageFlags;
 pub use crate::pfn::PageFrame;
+pub use the_buddy_system_derive::PageFrame;
+pub use the_memblock::addr::PhysAddr;
 
 pub mod buddy;
 pub mod error;

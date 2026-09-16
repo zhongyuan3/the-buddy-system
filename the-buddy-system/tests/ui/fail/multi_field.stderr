@@ -1,0 +1,5 @@
+error: `#[derive(PageFrame)]` requires exactly one field, found 2
+ --> tests/ui/fail/multi_field.rs:4:17
+  |
+4 | struct TwoFields(usize, usize);
+  |                 ^^^^^^^^^^^^^^

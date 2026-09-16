@@ -1,11 +1,3 @@
-[package]
-name = "the-buddy-system"
-version = "0.1.0"
-edition = "2024"
-description = "A no_std reimplementation of the Linux kernel's buddy page allocator"
-license = "MIT"
-rust-version = "1.85"
-
-[dependencies]
-bitflags = "2.13.0"
-the-memblock = { path = "../the-memblock/the-memblock", version = "0.2.0" }
+[workspace]
+members = ["the-buddy-system", "the-buddy-system-derive"]
+resolver = "2"

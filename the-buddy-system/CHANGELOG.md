@@ -8,6 +8,11 @@ All notable changes to this project are documented in this file.
 
 - Initial release: a `no_std` buddy page allocator mirroring the Linux
   kernel's `mm/page_alloc.c`.
+- `#[derive(PageFrame)]`, provided by the new `the-buddy-system-derive`
+  crate and re-exported at the crate root alongside the `PageFrame` trait.
+  It implements `PageFrame`, its memblock `PhysAddr` supertrait and every
+  required supertrait for single-field tuple structs wrapping another
+  `PageFrame` implementor, e.g. `#[derive(PageFrame)] struct Addr(u64);`.
 - `Buddy<'a, A, MAX_ORDER>` over a caller-provided page descriptor array,
   with `free_range` (`free_low_memory_core_early`), `alloc_pages`
   (`__rmqueue_smallest` plus `expand`) and `free_pages` (`__free_pages`

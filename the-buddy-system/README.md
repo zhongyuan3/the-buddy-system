@@ -21,6 +21,9 @@ onto a `vmemmap` style array placed in early boot memory.
 - Fixed-capacity, `no_std`, no allocation: the caller owns the page
   descriptor array. The allocator's own `unsafe` is confined to rebuilding
   the descriptor slice from the stored address and length.
+- `#[derive(PageFrame)]` for custom address newtypes: one derive
+  implements the buddy trait, its memblock supertrait and every required
+  supertrait for a single-field wrapper.
 - `MAX_ORDER` as a const generic (the kernel's `MAX_ORDER`), with runtime
   page sizes (4 KiB, 16 KiB, 64 KiB, ...).
 - Address-width safe: absolute physical addresses stay in the address
@@ -53,6 +56,34 @@ let addr = buddy.alloc_pages(2).unwrap(); // 4 pages
 assert_eq!(addr % (4 * 0x1000), 0);
 buddy.free_pages(addr, 2).unwrap();
 ```
+
+## Custom address types
+
+The `PageFrame` trait is implemented for every unsigned primitive, but you
+can wrap a primitive in your own type with the `#[derive(PageFrame)]`
+macro. The derive transparently forwards all address arithmetic and index
+conversions to the inner type, and also implements the memblock
+supertrait, so the wrapper works with `Memblock` as well:
+
+```rust
+use the_buddy_system::Buddy;
+use the_buddy_system::Page;
+use the_buddy_system::PageFrame;
+
+#[derive(PageFrame)]
+#[repr(transparent)]
+struct Addr(u64);
+
+let mut pages = [Page::EMPTY; 64];
+let mut buddy = Buddy::<Addr, 4>::new(Addr(0), Addr(0x1000), &mut pages).unwrap();
+buddy.free_range(Addr(0), Addr(64 * 0x1000)).unwrap();
+let base = buddy.alloc_pages(2).unwrap();
+assert_eq!(base.0 % (4 * 0x1000), 0);
+```
+
+Only concrete single-field tuple structs are supported. The derive
+implements `the_memblock::PhysAddr` as well, so do not also derive
+`PhysAddr` for the same type.
 
 ## Descriptor array storage
 

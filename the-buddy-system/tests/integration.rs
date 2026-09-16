@@ -8,7 +8,6 @@ use the_buddy_system::Buddy;
 use the_buddy_system::Error;
 use the_buddy_system::Page;
 use the_buddy_system::PageFrame;
-use the_memblock::PhysAddr;
 use the_memblock::flags::MemblockFlags;
 use the_memblock::memblock::Memblock;
 
@@ -125,22 +124,12 @@ fn allocator_can_be_placed_in_a_lock() {
     assert_send::<Buddy<'static, usize, MAX_ORDER>>();
 }
 
-/// A custom physical address newtype: `#[derive(PhysAddr)]` provides the
-/// memblock trait, and [`PageFrame`] is implemented by forwarding to the
-/// inner integer.
-#[derive(PhysAddr)]
+/// A custom physical address newtype: `#[derive(PageFrame)]` implements
+/// the buddy trait, its memblock supertrait and everything they require,
+/// all by forwarding to the inner integer.
+#[derive(PageFrame)]
 #[repr(transparent)]
 struct Addr(u64);
-
-impl PageFrame for Addr {
-    fn try_to_usize(self) -> Option<usize> {
-        usize::try_from(self.0).ok()
-    }
-
-    fn from_usize(index: usize) -> Self {
-        Addr(index as u64)
-    }
-}
 
 #[test]
 fn custom_address_type_works_end_to_end() {
