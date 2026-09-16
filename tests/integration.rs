@@ -1,6 +1,9 @@
 //! Integration tests exercising the public API together with
 //! `the-memblock`.
 
+use core::ptr::NonNull;
+use std::sync::Mutex;
+
 use the_buddy_system::Buddy;
 use the_buddy_system::Error;
 use the_buddy_system::Page;
@@ -77,10 +80,27 @@ fn wide_physical_addresses_above_usize_range() {
     buddy.validate().unwrap();
 }
 
+/// A static allocator, as a kernel would define it: the placeholder is the
+/// constant initializer and the descriptors are supplied at boot.
+static BUDDY: Mutex<Buddy<'static, usize, MAX_ORDER>> = Mutex::new(Buddy::uninit());
+
+#[test]
+fn static_placeholder_can_be_initialized() {
+    let pages: &'static mut [Page] = Box::leak(vec![Page::EMPTY; PAGES].into_boxed_slice());
+    let ptr = NonNull::new(pages.as_mut_ptr()).unwrap();
+
+    let mut guard = BUDDY.lock().unwrap();
+    assert!(!guard.is_initialized());
+    // SAFETY: the leaked descriptor array lives for the rest of the
+    // process, and it is only reached through this mutex.
+    unsafe { guard.init(ptr, PAGES, BASE, PS) }.unwrap();
+    guard.free_range(BASE, BASE + PAGES * PS).unwrap();
+    assert_eq!(guard.nr_free(), PAGES);
+    guard.validate().unwrap();
+}
+
 #[test]
 fn kernel_style_raw_descriptor_array() {
-    use core::ptr::NonNull;
-
     let mut pages = vec![Page::EMPTY; PAGES];
     let ptr = NonNull::new(pages.as_mut_ptr()).unwrap();
 

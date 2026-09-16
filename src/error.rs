@@ -27,6 +27,18 @@ pub enum Error {
     /// [`Buddy::from_raw_parts`]: crate::buddy::Buddy::from_raw_parts
     /// [`Page`]: crate::page::Page
     InvalidPageArray,
+    /// An operation that needs page descriptors was attempted on an
+    /// allocator created by [`Buddy::uninit`] whose [`Buddy::init`] has not
+    /// run yet.
+    ///
+    /// [`Buddy::uninit`]: crate::buddy::Buddy::uninit
+    /// [`Buddy::init`]: crate::buddy::Buddy::init
+    Uninitialized,
+    /// [`Buddy::init`] was called on an allocator that already manages
+    /// pages.
+    ///
+    /// [`Buddy::init`]: crate::buddy::Buddy::init
+    AlreadyInitialized,
     /// The arena geometry is invalid: fewer pages than `1 << (MAX_ORDER - 1)`,
     /// a base address not aligned to the largest block, or an address range
     /// that would wrap around the top of the address space.
@@ -52,6 +64,8 @@ impl core::fmt::Display for Error {
             Error::InvalidPageSize => "Invalid page size",
             Error::InvalidPageArray => "Invalid page descriptor array",
             Error::InvalidGeometry => "Invalid geometry",
+            Error::Uninitialized => "Allocator is not initialized",
+            Error::AlreadyInitialized => "Allocator is already initialized",
             Error::CorruptFreeList => "Corrupted free list",
             Error::Uncoalesced => "Uncoalesced buddies",
             Error::CountMismatch => "Free page count mismatch",
@@ -99,6 +113,14 @@ mod tests {
         assert_eq!(
             Error::InvalidGeometry.to_string().as_str(),
             "Invalid geometry"
+        );
+        assert_eq!(
+            Error::Uninitialized.to_string().as_str(),
+            "Allocator is not initialized"
+        );
+        assert_eq!(
+            Error::AlreadyInitialized.to_string().as_str(),
+            "Allocator is already initialized"
         );
         assert_eq!(
             Error::CorruptFreeList.to_string().as_str(),

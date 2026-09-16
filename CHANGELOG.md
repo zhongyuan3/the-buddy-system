@@ -17,6 +17,10 @@ All notable changes to this project are documented in this file.
   and `unsafe Buddy::from_raw_parts` returns a `'static` allocator for
   kernel `vmemmap` arrays that have no nameable borrow. `Buddy` implements
   `Send` so it can live in a caller-provided lock.
+- `Buddy::uninit`, a `const` placeholder for static definitions, plus the
+  one-shot `unsafe Buddy::init` that supplies the descriptors at boot.
+  Operations before initialization report `Error::Uninitialized`, and a
+  second `init` reports `Error::AlreadyInitialized`.
 - `PageFrame` address trait: checked narrowing of bounded page offsets and
   widening of indices, so 32-bit targets with wider physical address types
   never truncate addresses.

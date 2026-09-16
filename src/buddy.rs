@@ -57,6 +57,27 @@ use crate::pfn::PageFrame;
 ///   it is externally synchronized (for example by keeping the allocator
 ///   in a spin lock).
 ///
+/// # Static initialization
+///
+/// A static needs a constant initializer, but the descriptor address and
+/// page count only become known at boot. [`Buddy::uninit`] is a `const`
+/// placeholder for exactly that: it manages zero pages, every operation
+/// that needs descriptors reports [`Error::Uninitialized`] instead of
+/// touching the dangling internal pointer, and the one-shot
+/// [`Buddy::init`] fills it in. With a lock that has a `const fn new`, the
+/// whole static is safe to define:
+///
+/// ```ignore
+/// static BUDDY: SpinLock<Buddy<'static, u64, 11>> =
+///     SpinLock::new(Buddy::uninit());
+///
+/// fn boot(vmemmap: NonNull<Page>, nr_pages: usize) -> Result<(), Error> {
+///     // SAFETY: `vmemmap` names the descriptor array, which outlives the
+///     // system, and all access goes through the lock.
+///     unsafe { BUDDY.lock().init(vmemmap, nr_pages, 0, 0x1000) }
+/// }
+/// ```
+///
 /// # Address model
 ///
 /// `A` is the physical address type. As in the kernel, where `phys_addr_t`
@@ -190,25 +211,87 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         }
         let ptr = NonNull::new(pages.as_mut_ptr()).expect("slice pointers are never null");
 
+        let mut buddy = Self::uninit();
         // SAFETY: `pages` is a valid, exclusively borrowed slice for `'a`,
         // and the returned allocator holds that borrow through `PhantomData`.
-        unsafe { Self::init(ptr, nr_pages, base, page_size) }
+        unsafe { buddy.set_state(ptr, nr_pages, base, page_size) }?;
+        Ok(buddy)
     }
 
-    /// Shared constructor body: validates the geometry and resets the
-    /// descriptors to [`Page::EMPTY`].
+    /// A `const` placeholder for static definitions.
+    ///
+    /// The placeholder manages zero pages. Until [`Buddy::init`] runs, the
+    /// queries report zeroes and the operations that need descriptors
+    /// (`alloc_pages`, `free_pages`, `free_range`, `validate`) report
+    /// [`Error::Uninitialized`]; the dangling internal pointer is never
+    /// dereferenced. This makes `Buddy::uninit()` sound as the initializer
+    /// of a static that is filled in at boot.
+    pub const fn uninit() -> Self {
+        Self {
+            page_size: A::ZERO,
+            base_pfn: A::ZERO,
+            pages: NonNull::dangling(),
+            nr_pages: 0,
+            areas: [FreeArea::new(); MAX_ORDER],
+            nr_free: 0,
+            _pages: PhantomData,
+        }
+    }
+
+    /// Returns `true` once a constructor or [`Buddy::init`] has supplied a
+    /// descriptor array.
+    pub const fn is_initialized(&self) -> bool {
+        self.nr_pages != 0
+    }
+
+    /// Initializes an allocator created by [`Buddy::uninit`].
+    ///
+    /// Validates the arena geometry, resets the descriptors to
+    /// [`Page::EMPTY`] and starts managing the array, exactly like
+    /// [`Buddy::from_raw_parts`], but in place. On failure the allocator is
+    /// left in the placeholder state, so a failed boot probe can be retried
+    /// with a corrected geometry.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Buddy::from_raw_parts`]: `ptr` must point to
+    /// `nr_pages` properly aligned `Page` descriptors that stay valid and
+    /// exclusively accessible (under the caller's synchronization) for as
+    /// long as the allocator is used.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::AlreadyInitialized`] if the allocator already manages
+    /// pages; otherwise the same errors as [`Buddy::new`].
+    pub unsafe fn init(
+        &mut self,
+        ptr: NonNull<Page>,
+        nr_pages: usize,
+        base: A,
+        page_size: A,
+    ) -> Result<(), Error> {
+        if self.is_initialized() {
+            return Err(Error::AlreadyInitialized);
+        }
+        // SAFETY: the caller guarantees the descriptor contract.
+        unsafe { self.set_state(ptr, nr_pages, base, page_size) }
+    }
+
+    /// Shared body of every raw initialization: validates the geometry and
+    /// resets the descriptors to [`Page::EMPTY`].
     ///
     /// # Safety
     ///
     /// `ptr` must point to `nr_pages` valid, properly aligned `Page`
     /// descriptors that stay exclusively accessible for the whole call and
     /// for every later method call; see [`Buddy::from_raw_parts`].
-    unsafe fn init(
+    unsafe fn set_state(
+        &mut self,
         ptr: NonNull<Page>,
         nr_pages: usize,
         base: A,
         page_size: A,
-    ) -> Result<Self, Error> {
+    ) -> Result<(), Error> {
         if MAX_ORDER == 0 || MAX_ORDER > usize::BITS as usize {
             return Err(Error::InvalidGeometry);
         }
@@ -263,28 +346,34 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
             *page = Page::EMPTY;
         }
 
-        Ok(Self {
-            page_size,
-            base_pfn,
-            pages: ptr,
-            nr_pages,
-            areas: [FreeArea::new(); MAX_ORDER],
-            nr_free: 0,
-            _pages: PhantomData,
-        })
+        self.page_size = page_size;
+        self.base_pfn = base_pfn;
+        self.pages = ptr;
+        self.nr_pages = nr_pages;
+        self.areas = [FreeArea::new(); MAX_ORDER];
+        self.nr_free = 0;
+        Ok(())
     }
 
     /// Returns the physical address of the first managed page.
+    ///
+    /// Returns `A::ZERO` while the allocator is uninitialized, where there
+    /// is no managed range at all.
     pub fn base(&self) -> A {
+        if !self.is_initialized() {
+            return A::ZERO;
+        }
         A::pfn_to_phys(self.base_pfn, self.page_size)
     }
 
-    /// Returns the page size the allocator was created with.
+    /// Returns the page size the allocator was created with, or `A::ZERO`
+    /// while the allocator is uninitialized.
     pub fn page_size(&self) -> A {
         self.page_size
     }
 
-    /// Returns the number of managed pages (`zone->managed_pages`).
+    /// Returns the number of managed pages (`zone->managed_pages`), zero
+    /// while the allocator is uninitialized.
     pub fn managed_pages(&self) -> usize {
         self.nr_pages
     }
@@ -407,6 +496,9 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     /// [`Error::OutOfMemory`] if no free block of that order or larger
     /// exists.
     pub fn alloc_pages(&mut self, order: u8) -> Result<A, Error> {
+        if !self.is_initialized() {
+            return Err(Error::Uninitialized);
+        }
         if order as usize >= MAX_ORDER {
             return Err(Error::InvalidOrder);
         }
@@ -452,6 +544,9 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     /// managed range. [`Error::InvalidFree`] if the block is already free,
     /// overlaps free memory, or is not in use.
     pub fn free_pages(&mut self, addr: A, order: u8) -> Result<(), Error> {
+        if !self.is_initialized() {
+            return Err(Error::Uninitialized);
+        }
         if order as usize >= MAX_ORDER {
             return Err(Error::InvalidOrder);
         }
@@ -487,6 +582,10 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     /// Returns [`Error::InvalidFree`] if the range overlaps memory that is
     /// already free or in use.
     pub fn free_range(&mut self, start: A, end: A) -> Result<(), Error> {
+        if !self.is_initialized() {
+            return Err(Error::Uninitialized);
+        }
+
         let start_pfn = max(A::pfn_up(start, self.page_size), self.base_pfn);
         let end_limit = self.pfn_of_index(self.nr_pages);
         let end_pfn = min(A::pfn_down(end, self.page_size), end_limit);
@@ -585,6 +684,10 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     /// Returns [`Error::CorruptFreeList`], [`Error::CountMismatch`] or
     /// [`Error::Uncoalesced`] describing the first violated invariant.
     pub fn validate(&self) -> Result<(), Error> {
+        if !self.is_initialized() {
+            return Err(Error::Uninitialized);
+        }
+
         let mut page_total = 0usize;
         let mut listed_heads = 0usize;
 
@@ -683,9 +786,11 @@ impl<A: PageFrame, const MAX_ORDER: usize> Buddy<'static, A, MAX_ORDER> {
         base: A,
         page_size: A,
     ) -> Result<Self, Error> {
+        let mut buddy = Self::uninit();
         // SAFETY: the caller guarantees validity, lifetime and exclusive
         // access to the descriptor array.
-        unsafe { Self::init(ptr, nr_pages, base, page_size) }
+        unsafe { buddy.set_state(ptr, nr_pages, base, page_size) }?;
+        Ok(buddy)
     }
 }
 
@@ -710,6 +815,82 @@ mod tests {
         let mut buddy = arena(pages);
         buddy.free_range(0, PAGES * PS).unwrap();
         buddy
+    }
+
+    #[test]
+    fn uninit_is_inert_and_const() {
+        // The placeholder must be usable in a constant initializer.
+        const PLACEHOLDER: Buddy<'static, usize, MAX_ORDER> = Buddy::uninit();
+        assert!(!PLACEHOLDER.is_initialized());
+        assert_eq!(PLACEHOLDER.managed_pages(), 0);
+        assert_eq!(PLACEHOLDER.nr_free(), 0);
+        assert_eq!(PLACEHOLDER.base(), 0);
+        assert_eq!(PLACEHOLDER.page_size(), 0);
+        assert_eq!(PLACEHOLDER.nr_free_blocks(0), Some(0));
+
+        // No operation may touch the dangling descriptor pointer.
+        let mut buddy = Buddy::<usize, MAX_ORDER>::uninit();
+        assert!(matches!(buddy.alloc_pages(0), Err(Error::Uninitialized)));
+        assert!(matches!(
+            buddy.free_pages(0, 0),
+            Err(Error::Uninitialized)
+        ));
+        assert!(matches!(
+            buddy.free_range(0, PAGES * PS),
+            Err(Error::Uninitialized)
+        ));
+        assert!(matches!(buddy.validate(), Err(Error::Uninitialized)));
+    }
+
+    #[test]
+    fn init_fills_the_placeholder_once() {
+        let mut pages = [Page::EMPTY; PAGES];
+        let ptr = NonNull::new(pages.as_mut_ptr()).unwrap();
+        let mut buddy = Buddy::<usize, MAX_ORDER>::uninit();
+
+        // SAFETY: `pages` is a local array, exclusively accessed through
+        // `buddy`, and outlives it.
+        unsafe { buddy.init(ptr, PAGES, 0, PS) }.unwrap();
+        assert!(buddy.is_initialized());
+        assert_eq!(buddy.managed_pages(), PAGES);
+        assert_eq!(buddy.base(), 0);
+
+        buddy.free_range(0, PAGES * PS).unwrap();
+        assert_eq!(buddy.nr_free(), PAGES);
+        buddy.validate().unwrap();
+
+        // A second init is rejected before any descriptor is touched.
+        // SAFETY: the same array; the call returns without touching it.
+        assert!(matches!(
+            unsafe { buddy.init(ptr, PAGES, 0, PS) },
+            Err(Error::AlreadyInitialized)
+        ));
+        assert_eq!(buddy.nr_free(), PAGES);
+        buddy.validate().unwrap();
+    }
+
+    #[test]
+    fn failed_init_leaves_the_placeholder_intact() {
+        let mut small = [Page::EMPTY; MAX_BLOCK - 1];
+        let small_ptr = NonNull::new(small.as_mut_ptr()).unwrap();
+        let mut buddy = Buddy::<usize, MAX_ORDER>::uninit();
+
+        // SAFETY: the pointer is valid; the geometry check fails before the
+        // descriptors are touched.
+        assert!(matches!(
+            unsafe { buddy.init(small_ptr, small.len(), 0, PS) },
+            Err(Error::InvalidGeometry)
+        ));
+        assert!(!buddy.is_initialized());
+
+        // A corrected init still succeeds afterwards.
+        let mut pages = [Page::EMPTY; PAGES];
+        let ptr = NonNull::new(pages.as_mut_ptr()).unwrap();
+        // SAFETY: `pages` is a local array, exclusively accessed through
+        // `buddy`, and outlives it.
+        unsafe { buddy.init(ptr, PAGES, 0, PS) }.unwrap();
+        buddy.free_range(0, PAGES * PS).unwrap();
+        buddy.validate().unwrap();
     }
 
     #[test]

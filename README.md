@@ -80,6 +80,22 @@ buddy.free_range(0x1_0000, 0x5_0000).unwrap();
 `SpinLock`; the lock provides the external synchronization the raw
 constructor requires.
 
+A `static` needs a constant initializer, but the descriptor address and
+page count only become known at boot. `Buddy::uninit` is a `const`
+placeholder for that, and the one-shot `unsafe Buddy::init` fills it in.
+Until then, operations that need descriptors report
+`Error::Uninitialized` instead of touching the dangling internal pointer:
+
+```rust
+use std::sync::Mutex;
+
+static BUDDY: Mutex<Buddy<'static, usize, 11>> = Mutex::new(Buddy::uninit());
+
+// After memory discovery, with the vmemmap mapped:
+let ptr = core::ptr::NonNull::new(vmemmap).unwrap();
+unsafe { BUDDY.lock().unwrap().init(ptr, nr_pages, base, page_size) }.unwrap();
+```
+
 ## Boot handoff from memblock
 
 The kernel leaves early boot by freeing what memblock did not reserve
