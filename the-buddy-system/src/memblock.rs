@@ -12,7 +12,7 @@ use crate::buddy::Buddy;
 use crate::error::Error;
 use crate::pfn::PageFrame;
 
-impl<A: PageFrame, const MAX_ORDER: usize> Buddy<'_, A, MAX_ORDER> {
+impl<A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'_, A, NR_PAGE_ORDERS> {
     /// Frees every free memory range tracked by `mb` into the allocator.
     ///
     /// Iterates `memblock_free_all`'s inputs, i.e.

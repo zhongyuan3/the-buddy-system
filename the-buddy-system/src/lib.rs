@@ -50,7 +50,7 @@
 //! - `mm/page_alloc.c`: `__free_one_page`, `__rmqueue_smallest`,
 //!   `expand`, `free_low_memory_core_early`, `prep_new_page`
 //! - `include/linux/mmzone.h`: `struct free_area`, `struct zone`,
-//!   `MAX_ORDER`
+//!   `MAX_PAGE_ORDER`, `NR_PAGE_ORDERS`
 //! - `include/linux/page-flags.h`: `PG_buddy`
 //! - `include/linux/mm_types.h`: `struct page`
 //!

@@ -35,11 +35,17 @@ use crate::pfn::PageFrame;
 /// a kernel can place the array wherever its early boot code reserved room
 /// for it.
 ///
-/// `MAX_ORDER` is the number of free areas, exactly like the kernel's
-/// `MAX_ORDER`: valid orders are `0..MAX_ORDER` and the largest block that
-/// can be allocated is `1 << (MAX_ORDER - 1)` pages
-/// (`MAX_ORDER_NR_PAGES`). The kernel's typical `MAX_ORDER` of 11 therefore
-/// means orders 0 through 10 with 4 MiB blocks on 4 KiB pages.
+/// `NR_PAGE_ORDERS` is the number of free areas, exactly like the kernel's
+/// `NR_PAGE_ORDERS`: valid orders are `0..=MAX_ORDER`, where `MAX_ORDER`
+/// is `NR_PAGE_ORDERS - 1` (the kernel's `MAX_PAGE_ORDER`), and the
+/// largest block that can be allocated is `1 << MAX_ORDER` pages
+/// (`MAX_ORDER_NR_PAGES`). The kernel's typical `MAX_PAGE_ORDER` of 10
+/// therefore means `NR_PAGE_ORDERS == 11` and 4 MiB blocks on 4 KiB pages.
+///
+/// The const parameter is the array length itself because stable Rust
+/// cannot express `[FreeArea; MAX_ORDER + 1]` with a generic `MAX_ORDER`.
+/// At concrete call sites the kernel formula still works:
+/// `const MAX_ORDER: usize = 10;` and `Buddy::<u64, { MAX_ORDER + 1 }>`.
 ///
 /// # Descriptor storage
 ///
@@ -118,7 +124,7 @@ use crate::pfn::PageFrame;
 // TODO(zone): wrap this in a zone type adding `GFP_*` flag filtering,
 // watermark checks (`__zone_watermark_ok`) and per-CPU pagesets
 // (`struct per_cpu_pages`).
-pub struct Buddy<'a, A: PageFrame, const MAX_ORDER: usize> {
+pub struct Buddy<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> {
     page_size: A,
     base_pfn: A,
     /// Address of the page descriptor array (the `vmemmap` counterpart).
@@ -127,7 +133,7 @@ pub struct Buddy<'a, A: PageFrame, const MAX_ORDER: usize> {
     pages: NonNull<Page>,
     /// Number of page descriptors, i.e. the array length.
     nr_pages: usize,
-    areas: [FreeArea; MAX_ORDER],
+    areas: [FreeArea; NR_PAGE_ORDERS],
     nr_free: usize,
     /// Marker for the borrow held by [`Buddy::new`]; raw construction
     /// ([`Buddy::from_raw_parts`]) uses `'static`.
@@ -139,7 +145,10 @@ pub struct Buddy<'a, A: PageFrame, const MAX_ORDER: usize> {
 // the caller to serialize access to the descriptors (see
 // `from_raw_parts`), so moving the allocator between threads cannot create
 // a data race.
-unsafe impl<A: PageFrame + Send, const MAX_ORDER: usize> Send for Buddy<'_, A, MAX_ORDER> {}
+unsafe impl<A: PageFrame + Send, const NR_PAGE_ORDERS: usize> Send
+    for Buddy<'_, A, NR_PAGE_ORDERS>
+{
+}
 
 /// Rebuilds the descriptor slice for the duration of one method call.
 ///
@@ -170,7 +179,18 @@ unsafe fn pages_ref<'p>(ptr: NonNull<Page>, len: usize) -> &'p [Page] {
     unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) }
 }
 
-impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
+impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS> {
+    /// The largest order the allocator can serve, i.e. `NR_PAGE_ORDERS - 1`.
+    ///
+    /// Mirrors the kernel's `MAX_PAGE_ORDER` (`MAX_ORDER_NR_PAGES` is
+    /// `1 << MAX_ORDER`): valid orders are `0..=MAX_ORDER`, and the
+    /// associated free area array has `NR_PAGE_ORDERS` entries.
+    ///
+    /// Saturating subtraction keeps the constant evaluable for the rejected
+    /// `NR_PAGE_ORDERS == 0`; the constructors reject that geometry before
+    /// the value is used.
+    pub const MAX_ORDER: usize = NR_PAGE_ORDERS.saturating_sub(1);
+
     /// Creates an allocator managing the page frames of `pages`.
     ///
     /// `base` is the physical address of the first managed page and
@@ -187,7 +207,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     /// zones:
     ///
     /// - the descriptor array holds at least the largest block,
-    ///   `1 << (MAX_ORDER - 1)` pages (`MAX_ORDER_NR_PAGES`);
+    ///   `1 << MAX_ORDER` pages (`MAX_ORDER_NR_PAGES`);
     /// - its length survives a `from_usize`/`try_to_usize` round trip, so
     ///   every index is exact;
     /// - `base` is aligned to the largest block, which makes index-space
@@ -232,7 +252,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
             base_pfn: A::ZERO,
             pages: NonNull::dangling(),
             nr_pages: 0,
-            areas: [FreeArea::new(); MAX_ORDER],
+            areas: [FreeArea::new(); NR_PAGE_ORDERS],
             nr_free: 0,
             _pages: PhantomData,
         }
@@ -292,7 +312,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         base: A,
         page_size: A,
     ) -> Result<(), Error> {
-        if MAX_ORDER == 0 || MAX_ORDER > usize::BITS as usize {
+        if NR_PAGE_ORDERS == 0 || NR_PAGE_ORDERS > usize::BITS as usize {
             return Err(Error::InvalidGeometry);
         }
         if (ptr.as_ptr() as usize) % align_of::<Page>() != 0 {
@@ -304,7 +324,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
             return Err(Error::InvalidPageSize);
         }
 
-        let max_block = pages_in_order((MAX_ORDER - 1) as u8);
+        let max_block = pages_in_order(Self::MAX_ORDER as u8);
         if nr_pages < max_block {
             return Err(Error::InvalidGeometry);
         }
@@ -350,7 +370,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         self.base_pfn = base_pfn;
         self.pages = ptr;
         self.nr_pages = nr_pages;
-        self.areas = [FreeArea::new(); MAX_ORDER];
+        self.areas = [FreeArea::new(); NR_PAGE_ORDERS];
         self.nr_free = 0;
         Ok(())
     }
@@ -384,10 +404,10 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     }
 
     /// Returns the number of free blocks of `order`
-    /// (`zone->free_area[order].nr_free`), or `None` if `order` is not
-    /// below `MAX_ORDER`.
+    /// (`zone->free_area[order].nr_free`), or `None` if `order` is above
+    /// `MAX_ORDER`.
     pub fn nr_free_blocks(&self, order: u8) -> Option<usize> {
-        if (order as usize) < MAX_ORDER {
+        if (order as usize) < NR_PAGE_ORDERS {
             Some(self.areas[order as usize].nr_free())
         } else {
             None
@@ -445,7 +465,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     /// Takes the descriptor slice rather than `&self` so that callers
     /// already holding it do not construct a second, aliasing one.
     fn is_inside_free_block(pages: &[Page], idx: usize) -> bool {
-        for order in 0..MAX_ORDER {
+        for order in 0..NR_PAGE_ORDERS {
             let head = idx & !(pages_in_order(order as u8) - 1);
             let page = &pages[head];
             if page.is_free() && page.order as usize == order {
@@ -492,14 +512,14 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidOrder`] if `order >= MAX_ORDER`, or
+    /// Returns [`Error::InvalidOrder`] if `order > MAX_ORDER`, or
     /// [`Error::OutOfMemory`] if no free block of that order or larger
     /// exists.
     pub fn alloc_pages(&mut self, order: u8) -> Result<A, Error> {
         if !self.is_initialized() {
             return Err(Error::Uninitialized);
         }
-        if order as usize >= MAX_ORDER {
+        if order as usize >= NR_PAGE_ORDERS {
             return Err(Error::InvalidOrder);
         }
 
@@ -511,7 +531,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         // TODO(migratetype): serve the requested migration type's list
         // first and fall back to the other lists when it is empty,
         // mirroring `__rmqueue_fallback`.
-        for current in order as usize..MAX_ORDER {
+        for current in order as usize..NR_PAGE_ORDERS {
             let Some(idx) = self.areas[current].pop_front(pages, current) else {
                 continue;
             };
@@ -538,7 +558,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidOrder`] if `order >= MAX_ORDER`.
+    /// Returns [`Error::InvalidOrder`] if `order > MAX_ORDER`.
     /// [`Error::InvalidAddress`] if `addr` is not page aligned, denotes a
     /// block head that is misaligned for its size, or lies outside the
     /// managed range. [`Error::InvalidFree`] if the block is already free,
@@ -547,7 +567,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         if !self.is_initialized() {
             return Err(Error::Uninitialized);
         }
-        if order as usize >= MAX_ORDER {
+        if order as usize >= NR_PAGE_ORDERS {
             return Err(Error::InvalidOrder);
         }
 
@@ -608,7 +628,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         while idx < end_idx {
             let remaining = end_idx - idx;
             let mut order = idx.trailing_zeros();
-            let max_order = (MAX_ORDER - 1) as u32;
+            let max_order = Self::MAX_ORDER as u32;
             if order > max_order {
                 order = max_order;
             }
@@ -678,7 +698,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
 
         let mut idx = idx;
         let mut order = order;
-        while (order as usize) + 1 < MAX_ORDER {
+        while (order as usize) < Self::MAX_ORDER {
             // TODO(bitmap): consult the per-order buddy bitmap first, as
             // `buddy_merge_likely` does, to avoid touching a cache-cold
             // buddy page for every failed merge.
@@ -733,7 +753,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
         // serialize against writers (see `from_raw_parts`).
         let pages = unsafe { pages_ref(self.pages, self.nr_pages) };
 
-        for order in 0..MAX_ORDER {
+        for order in 0..NR_PAGE_ORDERS {
             let block = pages_in_order(order as u8);
             let mut count = 0usize;
 
@@ -760,7 +780,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
 
             // Two free buddies at `order` would have been coalesced into
             // `order + 1`, so they cannot exist below the largest order.
-            if order + 1 < MAX_ORDER {
+            if order + 1 < NR_PAGE_ORDERS {
                 for idx in self.areas[order].iter(pages) {
                     let buddy = idx ^ block;
                     if buddy < self.nr_pages {
@@ -786,7 +806,7 @@ impl<'a, A: PageFrame, const MAX_ORDER: usize> Buddy<'a, A, MAX_ORDER> {
     }
 }
 
-impl<A: PageFrame, const MAX_ORDER: usize> Buddy<'static, A, MAX_ORDER> {
+impl<A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'static, A, NR_PAGE_ORDERS> {
     /// Creates a `'static` allocator over a page descriptor array given by
     /// address and length.
     ///
@@ -842,14 +862,15 @@ mod tests {
 
     const PS: usize = 0x1000;
     const PAGES: usize = 64;
-    const MAX_ORDER: usize = 6;
+    const NR_PAGE_ORDERS: usize = 6;
+    const MAX_ORDER: usize = NR_PAGE_ORDERS - 1;
     const MAX_BLOCK: usize = 32;
 
-    fn arena(pages: &mut [Page]) -> Buddy<'_, usize, MAX_ORDER> {
+    fn arena(pages: &mut [Page]) -> Buddy<'_, usize, NR_PAGE_ORDERS> {
         Buddy::new(0, PS, pages).unwrap()
     }
 
-    fn freed_arena(pages: &mut [Page]) -> Buddy<'_, usize, MAX_ORDER> {
+    fn freed_arena(pages: &mut [Page]) -> Buddy<'_, usize, NR_PAGE_ORDERS> {
         let mut buddy = arena(pages);
         buddy.free_range(0, PAGES * PS).unwrap();
         buddy
@@ -858,7 +879,7 @@ mod tests {
     #[test]
     fn uninit_is_inert_and_const() {
         // The placeholder must be usable in a constant initializer.
-        const PLACEHOLDER: Buddy<'static, usize, MAX_ORDER> = Buddy::uninit();
+        const PLACEHOLDER: Buddy<'static, usize, NR_PAGE_ORDERS> = Buddy::uninit();
         assert!(!PLACEHOLDER.is_initialized());
         assert_eq!(PLACEHOLDER.managed_pages(), 0);
         assert_eq!(PLACEHOLDER.nr_free(), 0);
@@ -867,7 +888,7 @@ mod tests {
         assert_eq!(PLACEHOLDER.nr_free_blocks(0), Some(0));
 
         // No operation may touch the dangling descriptor pointer.
-        let mut buddy = Buddy::<usize, MAX_ORDER>::uninit();
+        let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::uninit();
         assert!(matches!(buddy.alloc_pages(0), Err(Error::Uninitialized)));
         assert!(matches!(
             buddy.free_pages(0, 0),
@@ -884,7 +905,7 @@ mod tests {
     fn init_fills_the_placeholder_once() {
         let mut pages = [Page::EMPTY; PAGES];
         let ptr = NonNull::new(pages.as_mut_ptr()).unwrap();
-        let mut buddy = Buddy::<usize, MAX_ORDER>::uninit();
+        let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::uninit();
 
         // SAFETY: `pages` is a local array, exclusively accessed through
         // `buddy`, and outlives it.
@@ -911,7 +932,7 @@ mod tests {
     fn failed_init_leaves_the_placeholder_intact() {
         let mut small = [Page::EMPTY; MAX_BLOCK - 1];
         let small_ptr = NonNull::new(small.as_mut_ptr()).unwrap();
-        let mut buddy = Buddy::<usize, MAX_ORDER>::uninit();
+        let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::uninit();
 
         // SAFETY: the pointer is valid; the geometry check fails before the
         // descriptors are touched.
@@ -932,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_zero_max_order() {
+    fn new_rejects_zero_nr_page_orders() {
         let mut pages = [Page::EMPTY; 8];
         assert!(matches!(
             Buddy::<usize, 0>::new(0, PS, &mut pages),
@@ -944,11 +965,11 @@ mod tests {
     fn new_rejects_bad_page_size() {
         let mut pages = [Page::EMPTY; PAGES];
         assert!(matches!(
-            Buddy::<usize, MAX_ORDER>::new(0, 0, &mut pages),
+            Buddy::<usize, NR_PAGE_ORDERS>::new(0, 0, &mut pages),
             Err(Error::InvalidPageSize)
         ));
         assert!(matches!(
-            Buddy::<usize, MAX_ORDER>::new(0, 3, &mut pages),
+            Buddy::<usize, NR_PAGE_ORDERS>::new(0, 3, &mut pages),
             Err(Error::InvalidPageSize)
         ));
     }
@@ -959,7 +980,7 @@ mod tests {
         // The largest block spans MAX_BLOCK pages; a base that is only page
         // aligned cannot express it.
         assert!(matches!(
-            Buddy::<usize, MAX_ORDER>::new(PS, PS, &mut pages),
+            Buddy::<usize, NR_PAGE_ORDERS>::new(PS, PS, &mut pages),
             Err(Error::InvalidGeometry)
         ));
     }
@@ -968,7 +989,7 @@ mod tests {
     fn new_rejects_arena_smaller_than_max_block() {
         let mut pages = [Page::EMPTY; MAX_BLOCK - 1];
         assert!(matches!(
-            Buddy::<usize, MAX_ORDER>::new(0, PS, &mut pages),
+            Buddy::<usize, NR_PAGE_ORDERS>::new(0, PS, &mut pages),
             Err(Error::InvalidGeometry)
         ));
     }
@@ -977,7 +998,7 @@ mod tests {
     fn new_accepts_block_aligned_base() {
         let mut pages = [Page::EMPTY; PAGES];
         let base = MAX_BLOCK * PS;
-        let buddy = Buddy::<usize, MAX_ORDER>::new(base, PS, &mut pages).unwrap();
+        let buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(base, PS, &mut pages).unwrap();
         assert_eq!(buddy.base(), base);
         assert_eq!(buddy.page_size(), PS);
         assert_eq!(buddy.managed_pages(), PAGES);
@@ -992,9 +1013,9 @@ mod tests {
 
         assert_eq!(buddy.nr_free(), PAGES);
         // The largest two blocks cannot merge into an invalid order.
-        assert_eq!(buddy.nr_free_blocks(5), Some(2));
+        assert_eq!(buddy.nr_free_blocks(MAX_ORDER as u8), Some(2));
         assert_eq!(buddy.nr_free_blocks(4), Some(0));
-        assert_eq!(buddy.nr_free_blocks(MAX_ORDER as u8), None);
+        assert_eq!(buddy.nr_free_blocks(NR_PAGE_ORDERS as u8), None);
         buddy.validate().unwrap();
     }
 
@@ -1083,7 +1104,7 @@ mod tests {
 
         buddy.free_pages(addr, 2).unwrap();
         assert_eq!(buddy.nr_free(), PAGES);
-        assert_eq!(buddy.nr_free_blocks(5), Some(2));
+        assert_eq!(buddy.nr_free_blocks(MAX_ORDER as u8), Some(2));
         buddy.validate().unwrap();
     }
 
@@ -1107,7 +1128,7 @@ mod tests {
             buddy.free_pages(addr, 0).unwrap();
         }
         assert_eq!(buddy.nr_free(), PAGES);
-        assert_eq!(buddy.nr_free_blocks(5), Some(2));
+        assert_eq!(buddy.nr_free_blocks(MAX_ORDER as u8), Some(2));
         buddy.validate().unwrap();
     }
 
@@ -1117,7 +1138,7 @@ mod tests {
         let mut buddy = arena(&mut pages);
 
         assert!(matches!(
-            buddy.alloc_pages(MAX_ORDER as u8),
+            buddy.alloc_pages(NR_PAGE_ORDERS as u8),
             Err(Error::InvalidOrder)
         ));
         assert!(matches!(buddy.alloc_pages(0), Err(Error::OutOfMemory)));
@@ -1129,7 +1150,7 @@ mod tests {
         let mut buddy = freed_arena(&mut pages);
 
         assert!(matches!(
-            buddy.free_pages(0, MAX_ORDER as u8),
+            buddy.free_pages(0, NR_PAGE_ORDERS as u8),
             Err(Error::InvalidOrder)
         ));
         assert!(matches!(
@@ -1251,7 +1272,7 @@ mod tests {
                 let (addr, order) = live.swap_remove(i);
                 buddy.free_pages(addr, order).unwrap();
             } else {
-                let order = (rand() % MAX_ORDER as u64) as u8;
+                let order = (rand() % NR_PAGE_ORDERS as u64) as u8;
                 if let Ok(addr) = buddy.alloc_pages(order) {
                     live.push((addr, order));
                 }
@@ -1276,8 +1297,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn random_operations_on_kernel_sized_arena() {
-        // MAX_ORDER 11 (orders 0..10) as configured in the kernel by
-        // default, over a 8 MiB arena: 2048 pages of 4 KiB.
+        // NR_PAGE_ORDERS 11 (MAX_ORDER 10, orders 0..=10) as configured in
+        // the kernel by default, over a 8 MiB arena: 2048 pages of 4 KiB.
         const PAGES: usize = 2048;
         let mut pages = alloc::vec![Page::EMPTY; PAGES];
         let mut buddy = Buddy::<usize, 11>::new(0, PS, &mut pages).unwrap();

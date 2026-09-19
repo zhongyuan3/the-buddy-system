@@ -14,7 +14,7 @@ use the_memblock::memblock::Memblock;
 const PS: usize = 0x1000;
 const BASE: usize = 0x1_0000;
 const PAGES: usize = 64;
-const MAX_ORDER: usize = 4;
+const NR_PAGE_ORDERS: usize = 4;
 
 #[test]
 fn boot_handoff_from_memblock_to_buddy() {
@@ -25,7 +25,7 @@ fn boot_handoff_from_memblock_to_buddy() {
     mb.mark_nomap(BASE + 0x2_0000, PS).unwrap();
 
     let mut pages = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(BASE, PS, &mut pages).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
     buddy.free_memblock(&mb).unwrap();
 
     assert_eq!(buddy.nr_free(), PAGES - 3);
@@ -53,7 +53,7 @@ fn feeding_the_same_free_ranges_twice_is_rejected() {
     mb.add(BASE, PAGES * PS, MemblockFlags::NONE).unwrap();
 
     let mut pages = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(BASE, PS, &mut pages).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
     buddy.free_memblock(&mb).unwrap();
     assert!(matches!(buddy.free_memblock(&mb), Err(Error::InvalidFree)));
 }
@@ -65,7 +65,7 @@ fn wide_physical_addresses_above_usize_range() {
     // relative to the base is narrowed to `usize`.
     let base = 0x1_0000_0000u64;
     let mut pages = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<u64, MAX_ORDER>::new(base, PS as u64, &mut pages).unwrap();
+    let mut buddy = Buddy::<u64, NR_PAGE_ORDERS>::new(base, PS as u64, &mut pages).unwrap();
     buddy
         .free_range(base, base + (PAGES * PS) as u64)
         .unwrap();
@@ -81,7 +81,7 @@ fn wide_physical_addresses_above_usize_range() {
 
 /// A static allocator, as a kernel would define it: the placeholder is the
 /// constant initializer and the descriptors are supplied at boot.
-static BUDDY: Mutex<Buddy<'static, usize, MAX_ORDER>> = Mutex::new(Buddy::uninit());
+static BUDDY: Mutex<Buddy<'static, usize, NR_PAGE_ORDERS>> = Mutex::new(Buddy::uninit());
 
 #[test]
 fn static_placeholder_can_be_initialized() {
@@ -105,7 +105,7 @@ fn kernel_style_raw_descriptor_array() {
 
     // SAFETY: the descriptor array outlives the allocator (both are locals,
     // and `buddy` is dropped first) and all access goes through `buddy`.
-    let mut buddy: Buddy<'static, usize, MAX_ORDER> =
+    let mut buddy: Buddy<'static, usize, NR_PAGE_ORDERS> =
         unsafe { Buddy::from_raw_parts(ptr, PAGES, BASE, PS) }.unwrap();
 
     buddy.free_range(BASE, BASE + PAGES * PS).unwrap();
@@ -121,7 +121,7 @@ fn kernel_style_raw_descriptor_array() {
 #[test]
 fn allocator_can_be_placed_in_a_lock() {
     fn assert_send<T: Send>() {}
-    assert_send::<Buddy<'static, usize, MAX_ORDER>>();
+    assert_send::<Buddy<'static, usize, NR_PAGE_ORDERS>>();
 }
 
 /// A custom physical address newtype: `#[derive(PageFrame)]` implements
@@ -135,7 +135,7 @@ struct Addr(u64);
 fn custom_address_type_works_end_to_end() {
     let base = Addr(0x20_0000);
     let mut pages = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<Addr, MAX_ORDER>::new(base, Addr(PS as u64), &mut pages).unwrap();
+    let mut buddy = Buddy::<Addr, NR_PAGE_ORDERS>::new(base, Addr(PS as u64), &mut pages).unwrap();
     buddy
         .free_range(base, Addr(base.0 + (PAGES * PS) as u64))
         .unwrap();
@@ -161,7 +161,7 @@ fn free_memblock_from_a_locked_static() {
         .unwrap();
 
     let mut pages = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(BASE, PS, &mut pages).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
 
     // The guard dereferences to `Memblock`, and a shared borrow is all
     // `free_memblock` needs.
@@ -193,7 +193,7 @@ fn free_ranges_can_snapshot_before_releasing_the_memblock_lock() {
 
     // ...then feed the allocator with the lock already released.
     let mut pages = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<usize, MAX_ORDER>::new(BASE, PS, &mut pages).unwrap();
+    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
     buddy.free_ranges(ranges).unwrap();
     assert_eq!(buddy.nr_free(), 32);
     buddy.validate().unwrap();

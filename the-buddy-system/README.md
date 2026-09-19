@@ -24,8 +24,9 @@ onto a `vmemmap` style array placed in early boot memory.
 - `#[derive(PageFrame)]` for custom address newtypes: one derive
   implements the buddy trait, its memblock supertrait and every required
   supertrait for a single-field wrapper.
-- `MAX_ORDER` as a const generic (the kernel's `MAX_ORDER`), with runtime
-  page sizes (4 KiB, 16 KiB, 64 KiB, ...).
+- `NR_PAGE_ORDERS` as a const generic (the kernel's `NR_PAGE_ORDERS`;
+  `MAX_ORDER` is `NR_PAGE_ORDERS - 1`, mirroring the kernel's
+  `MAX_PAGE_ORDER`), with runtime page sizes (4 KiB, 16 KiB, 64 KiB, ...).
 - Address-width safe: absolute physical addresses stay in the address
   type, only bounded page offsets are narrowed to `usize`, so 32-bit
   targets with PAE-sized (64-bit `phys_addr_t`) physical addresses are
@@ -46,6 +47,7 @@ use the_buddy_system::Buddy;
 use the_buddy_system::Page;
 
 let mut pages = [Page::EMPTY; 64];
+// `4` is the number of free areas (`NR_PAGE_ORDERS`); `MAX_ORDER` is 3.
 let mut buddy = Buddy::<u64, 4>::new(0, 0x1000, &mut pages).unwrap();
 
 // Hand the allocator the memory that is actually free.

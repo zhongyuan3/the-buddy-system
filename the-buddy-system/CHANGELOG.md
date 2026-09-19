@@ -13,10 +13,14 @@ All notable changes to this project are documented in this file.
   It implements `PageFrame`, its memblock `PhysAddr` supertrait and every
   required supertrait for single-field tuple structs wrapping another
   `PageFrame` implementor, e.g. `#[derive(PageFrame)] struct Addr(u64);`.
-- `Buddy<'a, A, MAX_ORDER>` over a caller-provided page descriptor array,
-  with `free_range` (`free_low_memory_core_early`), `alloc_pages`
+- `Buddy<'a, A, NR_PAGE_ORDERS>` over a caller-provided page descriptor
+  array, with `free_range` (`free_low_memory_core_early`), `alloc_pages`
   (`__rmqueue_smallest` plus `expand`) and `free_pages` (`__free_pages`
-  with `free_pages_prepare` state checks).
+  with `free_pages_prepare` state checks). The const generic is the number
+  of free areas, mirroring the kernel's `NR_PAGE_ORDERS`: valid orders are
+  `0..=MAX_ORDER`, where the associated constant `Buddy::MAX_ORDER` is
+  `NR_PAGE_ORDERS - 1` (the kernel's `MAX_PAGE_ORDER`), and the largest
+  block is `1 << MAX_ORDER` pages (`MAX_ORDER_NR_PAGES`).
 - Descriptor array stored as an address plus a length; the slice is
   rebuilt inside each call. `Buddy::new` borrows a `&mut [Page]` safely,
   and `unsafe Buddy::from_raw_parts` returns a `'static` allocator for

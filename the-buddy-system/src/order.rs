@@ -6,8 +6,8 @@
 
 /// Returns the number of pages in a block of `order`, i.e. `1 << order`.
 ///
-/// Mirrors the kernel's block sizes derived from `MAX_ORDER`, such as
-/// `MAX_ORDER_NR_PAGES`.
+/// Mirrors the kernel's block sizes derived from `MAX_PAGE_ORDER` /
+/// `NR_PAGE_ORDERS`, such as `MAX_ORDER_NR_PAGES`.
 ///
 /// # Panics
 ///
@@ -17,11 +17,11 @@ pub const fn pages_in_order(order: u8) -> usize {
 }
 
 /// Returns the number of pages in the largest block an arena with the given
-/// `MAX_ORDER` can allocate, i.e. `1 << (MAX_ORDER - 1)`.
+/// (inclusive) `MAX_ORDER` can allocate, i.e. `1 << MAX_ORDER`.
 ///
 /// Mirrors the kernel's `MAX_ORDER_NR_PAGES`.
-pub const fn max_block_pages(max_order: usize) -> usize {
-    pages_in_order((max_order - 1) as u8)
+pub const fn max_block_pages(max_order: u8) -> usize {
+    pages_in_order(max_order)
 }
 
 #[cfg(test)]
@@ -39,9 +39,9 @@ mod tests {
 
     #[test]
     fn max_block_pages_matches_buddy_orders() {
-        // MAX_ORDER counts orders, so order MAX_ORDER - 1 is the largest.
-        assert_eq!(max_block_pages(1), 1);
-        assert_eq!(max_block_pages(4), 8);
-        assert_eq!(max_block_pages(11), 1024);
+        // MAX_ORDER is inclusive, so 1 << MAX_ORDER is the largest block.
+        assert_eq!(max_block_pages(0), 1);
+        assert_eq!(max_block_pages(3), 8);
+        assert_eq!(max_block_pages(10), 1024);
     }
 }

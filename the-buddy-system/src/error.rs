@@ -9,7 +9,7 @@
 pub enum Error {
     /// No free block of the requested order (or any larger order) exists.
     OutOfMemory,
-    /// The requested order is not below `MAX_ORDER`.
+    /// The requested order is above `MAX_ORDER` (`NR_PAGE_ORDERS - 1`).
     InvalidOrder,
     /// The address is misaligned, does not denote the start of a block, or
     /// lies outside the managed range.
@@ -39,7 +39,7 @@ pub enum Error {
     ///
     /// [`Buddy::init`]: crate::buddy::Buddy::init
     AlreadyInitialized,
-    /// The arena geometry is invalid: fewer pages than `1 << (MAX_ORDER - 1)`,
+    /// The arena geometry is invalid: fewer pages than `1 << MAX_ORDER`,
     /// a base address not aligned to the largest block, or an address range
     /// that would wrap around the top of the address space.
     InvalidGeometry,
