@@ -133,6 +133,11 @@ pub struct Buddy<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> {
     pages: NonNull<Page>,
     /// Number of page descriptors, i.e. the array length.
     nr_pages: usize,
+    /// Whether a constructor or [`Buddy::init`] has supplied a descriptor
+    /// array. Tracked explicitly instead of being derived from `nr_pages`,
+    /// which is zero both before initialization and for the geometries the
+    /// constructors reject.
+    initialized: bool,
     areas: [FreeArea; NR_PAGE_ORDERS],
     nr_free: usize,
     /// Marker for the borrow held by [`Buddy::new`]; raw construction
@@ -252,6 +257,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             base_pfn: A::ZERO,
             pages: NonNull::dangling(),
             nr_pages: 0,
+            initialized: false,
             areas: [FreeArea::new(); NR_PAGE_ORDERS],
             nr_free: 0,
             _pages: PhantomData,
@@ -261,7 +267,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// Returns `true` once a constructor or [`Buddy::init`] has supplied a
     /// descriptor array.
     pub const fn is_initialized(&self) -> bool {
-        self.nr_pages != 0
+        self.initialized
     }
 
     /// Initializes an allocator created by [`Buddy::uninit`].
@@ -372,6 +378,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         self.nr_pages = nr_pages;
         self.areas = [FreeArea::new(); NR_PAGE_ORDERS];
         self.nr_free = 0;
+        self.initialized = true;
         Ok(())
     }
 
