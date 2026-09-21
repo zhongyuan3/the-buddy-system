@@ -207,20 +207,6 @@ MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri tes
 interpretation is too slow at that size; the same code paths run in
 `random_operations_keep_invariants`.
 
-## Roadmap
-
-The core allocator is complete. The kernel layers built on top of it are
-not implemented yet; the extension points are marked with `TODO(name)`
-comments in the source:
-
-- migration types (`__rmqueue_fallback`) — `TODO(migratetype)`
-- zones, `GFP_*` flags, watermarks and per-CPU pagesets — `TODO(zone)`
-- `buddy_merge_likely` bitmap and anti-fragmentation tail insertion —
-  `TODO(bitmap)`, `TODO(antifrag)`
-- guard pages and page poisoning — `TODO(guard)`
-- pageblock helpers (isolation, hotplug) — `TODO(pageblock)`
-- remaining `struct page` fields — `TODO(page)`
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
