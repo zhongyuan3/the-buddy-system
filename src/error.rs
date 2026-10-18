@@ -14,9 +14,10 @@ pub enum Error {
     /// The address is misaligned, does not denote the start of a block, or
     /// lies outside the managed range.
     InvalidAddress,
-    /// The block may not be freed: it is already free, in use, or the
-    /// freed range overlaps pages that are not free. Also reported when a
-    /// free range overlaps an already freed region.
+    /// The block may not be freed: it is already free, in use, the freed
+    /// range overlaps pages that are not free, or the order does not match
+    /// the order the block was allocated with. Also reported when a free
+    /// range overlaps an already freed region.
     InvalidFree,
     /// The page size is zero, not a power of two, or not representable.
     InvalidPageSize,

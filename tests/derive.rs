@@ -29,9 +29,6 @@ fn derived_constants() {
 fn derived_phys_addr_methods_delegate() {
     assert_eq!(Addr::align_up(Addr(1), Addr(PS)), Addr(PS));
     assert_eq!(Addr::align_down(Addr(0x1fff), Addr(PS)), Addr(PS));
-    assert_eq!(Addr::pfn_up(Addr(1), Addr(PS)), Addr(1));
-    assert_eq!(Addr::pfn_down(Addr(0xfff), Addr(PS)), Addr(0));
-    assert_eq!(Addr::pfn_to_phys(Addr(2), Addr(PS)), Addr(0x2000));
     // Saturation near the top of the address space is preserved.
     assert_eq!(
         Addr::align_up(Addr(u64::MAX - 0x7f), Addr(0x100)),
@@ -45,6 +42,10 @@ fn derived_page_frame_methods_delegate() {
     assert_eq!(Addr::from_usize(0x1234), Addr(0x1234));
     assert_eq!(UsizeAddr(0x1234).try_to_usize(), Some(0x1234));
     assert_eq!(UsizeAddr::from_usize(0x1234), UsizeAddr(0x1234));
+
+    assert_eq!(Addr::phys_to_pfn(Addr(0xfff), Addr(PS)), Addr(0));
+    assert_eq!(Addr::pfn_ceil(Addr(1), Addr(PS)), Addr(1));
+    assert_eq!(Addr::pfn_to_phys(Addr(2), Addr(PS)), Addr(0x2000));
 }
 
 #[test]

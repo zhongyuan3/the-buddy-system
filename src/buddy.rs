@@ -5,14 +5,12 @@
 //!
 //! - [`Buddy::free_range`] mirrors `free_low_memory_core_early` /
 //!   `__free_pages_memory` and bootstraps the allocator from memory
-//!   discovered at boot (typically the free ranges of [`Memblock`]).
+//!   discovered at boot (typically the free ranges of a memblock).
 //! - `expand` (private) mirrors the kernel's `expand`.
 //! - `free_one_page` (private) mirrors the kernel's `__free_one_page`.
 //! - [`Buddy::alloc_pages`] mirrors `__rmqueue_smallest` plus `expand`.
 //! - [`Buddy::free_pages`] mirrors `__free_pages` followed by
 //!   `free_pages_prepare`'s state checks.
-//!
-//! [`Memblock`]: the_memblock::memblock::Memblock
 
 use core::cmp::max;
 use core::cmp::min;
@@ -201,7 +199,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// `base` is the physical address of the first managed page and
     /// `page_size` its size. All descriptors are reset to [`Page::EMPTY`];
     /// no page is free until a range is handed to [`Buddy::free_range`] or
-    /// [`Buddy::free_memblock`], mirroring the kernel, where memory is only
+    /// [`Buddy::free_ranges`], mirroring the kernel, where memory is only
     /// freed into the buddy allocator by `memblock_free_all`.
     ///
     /// The borrow guarantees that the descriptor array outlives the
@@ -337,19 +335,16 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
         // The page count must be representable as an index and as a PFN:
         // this rejects narrow address types whose `from_usize` saturates.
-        let len = A::from_usize(nr_pages);
-        if len.try_to_usize() != Some(nr_pages) {
-            return Err(Error::InvalidGeometry);
-        }
+        let len = A::try_from_usize(nr_pages).ok_or(Error::InvalidGeometry)?;
 
-        let base_pfn = A::pfn_down(base, page_size);
+        let base_pfn = A::phys_to_pfn(base, page_size);
 
         // The managed range may not wrap around the top of the address
         // space, and the last page's address must be representable.
         if base_pfn > A::MAX - len {
             return Err(Error::InvalidGeometry);
         }
-        let max_pfn = A::pfn_down(A::MAX, page_size);
+        let max_pfn = A::phys_to_pfn(A::MAX, page_size);
         let last = len - A::from_usize(1);
         if base_pfn > max_pfn || max_pfn - base_pfn < last {
             return Err(Error::InvalidGeometry);
@@ -458,7 +453,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         if A::align_down(addr, self.page_size) != addr {
             return Err(Error::InvalidAddress);
         }
-        self.index_of_pfn(A::pfn_down(addr, self.page_size))
+        self.index_of_pfn(A::phys_to_pfn(addr, self.page_size))
     }
 
     /// Returns `true` if `idx` lies inside a free block.
@@ -548,7 +543,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
             let page = &mut pages[idx];
             page.flags.remove(PageFlags::BUDDY);
-            page.order = 0;
+            page.order = order;
             page.refcount = 1;
             return Ok(self.addr_of_index(idx));
         }
@@ -591,6 +586,9 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         if page.is_free() || page.refcount != 1 {
             return Err(Error::InvalidFree);
         }
+        if page.order != order {
+            return Err(Error::InvalidFree);
+        }
         page.refcount = 0;
 
         self.free_one_page(pages, idx, order)
@@ -613,9 +611,9 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             return Err(Error::Uninitialized);
         }
 
-        let start_pfn = max(A::pfn_up(start, self.page_size), self.base_pfn);
+        let start_pfn = max(A::pfn_ceil(start, self.page_size), self.base_pfn);
         let end_limit = self.pfn_of_index(self.nr_pages);
-        let end_pfn = min(A::pfn_down(end, self.page_size), end_limit);
+        let end_pfn = min(A::phys_to_pfn(end, self.page_size), end_limit);
 
         if start_pfn >= end_pfn {
             return Ok(());
@@ -654,10 +652,9 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// calling [`Buddy::free_range`] for every range in turn.
     ///
     /// Useful for callers that hold a list of ranges instead of a live
-    /// source, for example a snapshot of
-    /// [`Memblock::free_mem_ranges`] taken while the memblock lock was
-    /// held, so that the lock can be released before the allocator is
-    /// touched.
+    /// source, for example a snapshot of a boot allocator's free ranges
+    /// taken while the boot allocator's lock was held, so that the lock can
+    /// be released before the allocator is touched.
     ///
     /// # Errors
     ///
@@ -676,8 +673,6 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// buddy.free_ranges([(0usize, 0x10_000)]).unwrap();
     /// assert_eq!(buddy.nr_free(), 16);
     /// ```
-    ///
-    /// [`Memblock::free_mem_ranges`]: the_memblock::memblock::Memblock::free_mem_ranges
     pub fn free_ranges<I>(&mut self, ranges: I) -> Result<(), Error>
     where
         I: IntoIterator<Item = (A, A)>,
@@ -1179,10 +1174,7 @@ mod tests {
         ));
         // ...nor twice.
         buddy.free_pages(addr, 1).unwrap();
-        assert!(matches!(
-            buddy.free_pages(addr, 1),
-            Err(Error::InvalidFree)
-        ));
+        assert!(matches!(buddy.free_pages(addr, 1), Err(Error::InvalidFree)));
     }
 
     #[test]
@@ -1336,5 +1328,24 @@ mod tests {
             }
             buddy.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn free_rejects_a_mismatched_order() {
+        let mut pages = [Page::EMPTY; PAGES];
+        let mut buddy = freed_arena(&mut pages);
+
+        let addr = buddy.alloc_pages(2).unwrap();
+        assert_eq!(buddy.nr_free(), PAGES - 4);
+
+        // Freeing the same block with the wrong order must not touch the
+        // free lists or the descriptor state.
+        assert!(matches!(buddy.free_pages(addr, 1), Err(Error::InvalidFree)));
+        assert_eq!(buddy.nr_free(), PAGES - 4);
+        buddy.validate().unwrap();
+
+        buddy.free_pages(addr, 2).unwrap();
+        assert_eq!(buddy.nr_free(), PAGES);
+        buddy.validate().unwrap();
     }
 }

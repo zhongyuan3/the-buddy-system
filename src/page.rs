@@ -68,7 +68,12 @@ impl Page {
         self.flags
     }
 
-    /// Returns the block order stored on a free head page.
+    /// Returns the block order stored on a page.
+    ///
+    /// For the head of a free block this is the block's order. For the head
+    /// of an allocated block it is the order the block was allocated with,
+    /// which lets [`Buddy::free_pages`](crate::buddy::Buddy::free_pages)
+    /// reject a free with the wrong order.
     pub const fn order(&self) -> u8 {
         self.order
     }

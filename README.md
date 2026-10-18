@@ -22,8 +22,11 @@ onto a `vmemmap` style array placed in early boot memory.
   descriptor array. The allocator's own `unsafe` is confined to rebuilding
   the descriptor slice from the stored address and length.
 - `#[derive(PageFrame)]` for custom address newtypes: one derive
-  implements the buddy trait, its memblock supertrait and every required
-  supertrait for a single-field wrapper.
+  implements the buddy trait, the shared `PhysAddr` supertrait and every
+  required supertrait for a single-field wrapper.
+- No dependency on any boot allocator: `Buddy::free_ranges` accepts any
+  iterator of `(start, end)` pairs, so the boot handoff is explicit and the
+  allocator stays independent of `the-memblock` (or any other boot source).
 - `NR_PAGE_ORDERS` as a const generic (the kernel's `NR_PAGE_ORDERS`;
   `MAX_ORDER` is `NR_PAGE_ORDERS - 1`, mirroring the kernel's
   `MAX_PAGE_ORDER`), with runtime page sizes (4 KiB, 16 KiB, 64 KiB, ...).
@@ -63,9 +66,10 @@ buddy.free_pages(addr, 2).unwrap();
 
 The `PageFrame` trait is implemented for every unsigned primitive, but you
 can wrap a primitive in your own type with the `#[derive(PageFrame)]`
-macro. The derive transparently forwards all address arithmetic and index
-conversions to the inner type, and also implements the memblock
-supertrait, so the wrapper works with `Memblock` as well:
+macro. The derive transparently forwards all address arithmetic, the
+physical-address ↔ PFN conversions and the `usize` index conversions to the
+inner type, and also implements the shared `the_mm_core::PhysAddr`
+supertrait, so the wrapper works with `Memblock` and `the-slab` as well:
 
 ```rust
 use the_buddy_system::Buddy;
@@ -84,8 +88,8 @@ assert_eq!(base.0 % (4 * 0x1000), 0);
 ```
 
 Only concrete single-field tuple structs are supported. The derive
-implements `the_memblock::PhysAddr` as well, so do not also derive
-`PhysAddr` for the same type.
+implements the shared `the_mm_core::PhysAddr` trait as well, so do not also
+derive `PhysAddr` for the same type.
 
 ## Descriptor array storage
 
@@ -129,12 +133,12 @@ let ptr = core::ptr::NonNull::new(vmemmap).unwrap();
 unsafe { BUDDY.lock().unwrap().init(ptr, nr_pages, base, page_size) }.unwrap();
 ```
 
-## Boot handoff from memblock
+## Boot handoff from a boot allocator
 
 The kernel leaves early boot by freeing what memblock did not reserve
-(`memblock_free_all`). `the-buddy-system` mirrors that with
-[`Buddy::free_memblock`], which walks the free memory ranges of a
-[`the-memblock`] instance:
+(`memblock_free_all`). `the-buddy-system` stays independent of memblock: the
+caller passes the boot allocator's free ranges to [`Buddy::free_ranges`],
+which accepts any iterator of `(start, end)` pairs:
 
 ```rust
 use the_buddy_system::Buddy;
@@ -148,24 +152,23 @@ mb.reserve_kern(0x1_0000, 0x2000).unwrap(); // kernel image
 
 let mut pages = vec![Page::EMPTY; 64];
 let mut buddy = Buddy::<usize, 4>::new(0x1_0000, 0x1000, &mut pages).unwrap();
-buddy.free_memblock(&mb).unwrap();
+buddy.free_ranges(mb.free_mem_ranges(MemblockFlags::NONE)).unwrap();
 
 assert_eq!(buddy.nr_free(), 62);
 ```
 
-Memblocks usually live in a `static` behind a lock. `free_memblock` only
-needs a shared borrow, so no mutable reference is required — the guard
-dereferences to `Memblock` and `&guard` coerces to `&Memblock`:
+Memblocks usually live in a `static` behind a lock. `free_mem_ranges` only
+needs a shared borrow, so hold the guard for the duration of the handoff:
 
 ```rust
 static MEMBLOCK: Mutex<Memblock<usize, 16>> = Mutex::new(Memblock::new());
 
 let memblock = MEMBLOCK.lock().unwrap();
-buddy.free_memblock(&memblock).unwrap();
+buddy.free_ranges(memblock.free_mem_ranges(MemblockFlags::NONE)).unwrap();
 ```
 
 If the memblock lock should not be held while the allocator runs, snapshot
-the ranges and feed them afterwards with `Buddy::free_ranges`:
+the ranges first:
 
 ```rust
 let ranges: Vec<_> = MEMBLOCK
@@ -176,21 +179,22 @@ let ranges: Vec<_> = MEMBLOCK
 buddy.free_ranges(ranges).unwrap();
 ```
 
-[`Buddy::free_memblock`]: https://docs.rs/the-buddy-system/latest/the_buddy_system/buddy/struct.Buddy.html
 [`the-memblock`]: https://crates.io/crates/the-memblock
 
 ## Address model
 
 The allocator is generic over the physical address type, which implements
-[`PageFrame`] (an extension of memblock's `PhysAddr`). As in the kernel,
-where `phys_addr_t` can be wider than a pointer (36-bit physical
-addresses on 32-bit x86 with PAE), absolute addresses are never narrowed
-to `usize`: only page offsets relative to the arena base are, through a
-checked conversion. All free list links and buddy arithmetic
-(`idx ^ (1 << order)`) live in `usize` index space, which is isomorphic to
-PFN space because the arena base is aligned to the largest block.
+[`PageFrame`] (an extension of the shared [`PhysAddr`] trait from
+`the-mm-core`). As in the kernel, where `phys_addr_t` can be wider than a
+pointer (36-bit physical addresses on 32-bit x86 with PAE), absolute
+addresses are never narrowed to `usize`: only page offsets relative to the
+arena base are, through a checked conversion. All free list links and
+buddy arithmetic (`idx ^ (1 << order)`) live in `usize` index space, which
+is isomorphic to PFN space because the arena base is aligned to the
+largest block.
 
 [`PageFrame`]: https://docs.rs/the-buddy-system/latest/the_buddy_system/pfn/trait.PageFrame.html
+[`PhysAddr`]: https://docs.rs/the-mm-core/latest/the_mm_core/trait.PhysAddr.html
 
 ## Testing
 

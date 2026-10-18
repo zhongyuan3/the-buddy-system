@@ -2,6 +2,40 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **No memblock dependency at all.** The `memblock` feature,
+  `Buddy::free_memblock` and the `memblock` module were removed. The boot
+  handoff is explicit:
+  `buddy.free_ranges(mb.free_mem_ranges(MemblockFlags::NONE))`. Any boot
+  allocator, or a snapshot of ranges, can drive `free_ranges`.
+- **The address traits moved to `the-mm-core`.** `PageFrame` (and its
+  `PhysAddr` supertrait) now live in the shared `the-mm-core` crate.
+  `the_buddy_system::PageFrame` and `the_buddy_system::PhysAddr` are
+  re-exports, so existing code and `#[derive(PageFrame)]` keep working
+  unchanged.
+- **PFN conversions moved to `PageFrame`.** `PhysAddr` is now purely
+  address/alignment arithmetic. `PageFrame` provides `phys_to_pfn` (floor),
+  `pfn_to_phys` and `pfn_ceil` (exact ceil); `pfn_down` was removed and
+  `pfn_up` renamed. `#[derive(PageFrame)]` now generates the PFN methods in
+  the `PageFrame` implementation.
+- The buddy crate depends only on `the-mm-core`; `the-memblock` is used
+  only as a dev-dependency by the integration tests.
+- `Buddy::alloc_pages` now stores the allocated order in the block head,
+  and `Buddy::free_pages` rejects a free whose order does not match. This
+  turns an order mismatch into `Error::InvalidFree` instead of corrupting
+  the free lists.
+- Arena validation uses the new `PageFrame::try_from_usize` instead of a
+  manual `from_usize`/`try_to_usize` round trip.
+
+### Compatibility
+
+- Replace `buddy.free_memblock(&mb)` with
+  `buddy.free_ranges(mb.free_mem_ranges(MemblockFlags::NONE))` and remove
+  `features = ["memblock"]`.
+
 ## [0.1.0]
 
 ### Added

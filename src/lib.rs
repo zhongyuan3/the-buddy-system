@@ -22,28 +22,38 @@
 //!
 //! The typical boot sequence mirrors the kernel's:
 //!
-//! 1. Record physical memory with [`the_memblock`] and reserve the kernel
-//!    image and other early allocations.
+//! 1. Record physical memory with a boot allocator such as `the-memblock`
+//!    and reserve the kernel image and other early allocations.
 //! 2. Create the page descriptor array and hand it to [`Buddy::new`] (or
 //!    [`Buddy::from_raw_parts`] once the `vmemmap` is mapped).
-//! 3. Free the remaining memory with [`Buddy::free_memblock`]
-//!    (`memblock_free_all`).
+//! 3. Free the remaining memory with [`Buddy::free_ranges`], typically
+//!    from a boot allocator's free-range iterator (`memblock_free_all`).
 //! 4. Serve page allocations through [`Buddy::alloc_pages`] and
 //!    [`Buddy::free_pages`].
 //!
 //! # Address model
 //!
 //! The allocator is generic over the physical address type `A`, which only
-//! needs to implement [`PageFrame`] (an extension of memblock's
-//! [`PhysAddr`]). As in the kernel, where `phys_addr_t` can be wider than
-//! a pointer (36-bit physical addresses on 32-bit x86 with PAE), absolute
-//! addresses are never narrowed to `usize`; only page offsets relative to
-//! the arena base are, through a checked conversion.
+//! needs to implement [`PageFrame`] (an extension of [`PhysAddr`] that adds
+//! physical-address ↔ PFN and `usize` index conversions). Both traits live
+//! in the shared [`the_mm_core`] crate, so the buddy allocator has no
+//! dependency on any other allocator. As in the kernel, where `phys_addr_t`
+//! can be wider than a pointer (36-bit physical addresses on 32-bit x86
+//! with PAE), absolute addresses are never narrowed to `usize`; only page
+//! offsets relative to the arena base are, through a checked conversion.
 //!
 //! The [`PageFrame`] trait is implemented for every unsigned primitive;
 //! the [`#[derive(PageFrame)]`](crate::PageFrame) macro transparently
 //! implements it, together with the supertraits it requires, for
 //! single-field wrapper types such as `struct Addr(u64)`.
+//!
+//! # Boot handoff
+//!
+//! The allocator is independent of any boot allocator. [`Buddy::free_ranges`]
+//! accepts any iterator of `(start, end)` pairs, so the caller performs the
+//! handoff explicitly, for example from a memblock's free ranges. This keeps
+//! the buddy allocator free of a dependency on `the-memblock` (or any other
+//! boot allocator).
 //!
 //! # Kernel references
 //!
@@ -68,7 +78,7 @@
 //! - `TODO(pageblock)`: pageblock helpers for isolation and hotplug.
 //! - `TODO(page)`: the remaining `struct page` fields.
 //!
-//! [`PhysAddr`]: the_memblock::PhysAddr
+//! [`PhysAddr`]: the_mm_core::PhysAddr
 
 #![no_std]
 
@@ -78,12 +88,12 @@ pub use crate::page::Page;
 pub use crate::page::PageFlags;
 pub use crate::pfn::PageFrame;
 pub use the_buddy_system_derive::PageFrame;
-pub use the_memblock::addr::PhysAddr;
+pub use the_mm_core;
+pub use the_mm_core::PhysAddr;
 
 pub mod buddy;
 pub mod error;
 pub mod free_area;
-pub mod memblock;
 pub mod order;
 pub mod page;
 pub mod pfn;
