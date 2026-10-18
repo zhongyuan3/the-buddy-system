@@ -238,6 +238,18 @@ impl core::ops::Not for CustomFlags {
 impl RegionFlags for CustomFlags {
     const NONE: Self = Self(0);
 
+    fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
     fn should_skip(_region: Self, _requested: Self) -> bool {
         false
     }

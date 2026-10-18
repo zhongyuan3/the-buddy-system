@@ -93,7 +93,7 @@ pub use the_mm_core::PhysAddr;
 
 pub mod buddy;
 pub mod error;
-pub mod free_area;
+mod free_area;
 pub mod order;
 pub mod page;
 pub mod pfn;
