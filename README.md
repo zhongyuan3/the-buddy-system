@@ -37,6 +37,9 @@ onto a `vmemmap` style array placed in early boot memory.
 - Kernel-faithful algorithms and bookkeeping: `expand`,
   `__free_one_page`, `__rmqueue_smallest`, `free_low_memory_core_early`,
   `free_area.nr_free` block counts and `zone->free_pages` page counts.
+- Arbitrary page-aligned arenas: buddy alignment is computed in absolute
+  PFN space, so the base does not need to be aligned to the largest block
+  and the arena may be smaller than `1 << MAX_ORDER` pages.
 - Double free and invalid free detection through the per-block reference
   count, plus range overlap detection during boot handoff.
 - `validate()` invariant checker (free list integrity, block alignment,
@@ -188,10 +191,10 @@ The allocator is generic over the physical address type, which implements
 `the-mm-core`). As in the kernel, where `phys_addr_t` can be wider than a
 pointer (36-bit physical addresses on 32-bit x86 with PAE), absolute
 addresses are never narrowed to `usize`: only page offsets relative to the
-arena base are, through a checked conversion. All free list links and
-buddy arithmetic (`idx ^ (1 << order)`) live in `usize` index space, which
-is isomorphic to PFN space because the arena base is aligned to the
-largest block.
+arena base are, through a checked conversion. Free list links and array
+indexing use `usize` index space, while buddy alignment and coalescing are
+computed in absolute PFN space. The arena base therefore only needs page
+alignment, not alignment to the largest block.
 
 [`PageFrame`]: https://docs.rs/the-buddy-system/latest/the_buddy_system/pfn/trait.PageFrame.html
 [`PhysAddr`]: https://docs.rs/the-mm-core/latest/the_mm_core/trait.PhysAddr.html

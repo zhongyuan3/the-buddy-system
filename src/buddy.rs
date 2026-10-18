@@ -88,9 +88,9 @@ use crate::pfn::PageFrame;
 /// can be wider than a pointer (`CONFIG_PHYS_ADDR_T_64BIT` on 32-bit x86
 /// with PAE), absolute addresses are never narrowed to `usize`: only page
 /// offsets relative to `base` are, through the checked
-/// [`PageFrame::try_to_usize`]. All array indexing and buddy arithmetic
-/// (`idx ^ (1 << order)`) happens in `usize` index space, which is
-/// isomorphic to PFN space because `base` is aligned to the largest block.
+/// [`PageFrame::try_to_usize`]. Array indexing uses `usize` index space,
+/// while buddy alignment and coalescing are computed in absolute PFN space,
+/// so the arena base only needs page alignment.
 ///
 /// # Kernel layer
 ///
@@ -209,15 +209,16 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// The arena must satisfy the invariants the kernel guarantees for
     /// zones:
     ///
-    /// - the descriptor array holds at least the largest block,
-    ///   `1 << MAX_ORDER` pages (`MAX_ORDER_NR_PAGES`);
+    /// - the descriptor array holds at least one page;
     /// - its length survives a `from_usize`/`try_to_usize` round trip, so
     ///   every index is exact;
-    /// - `base` is aligned to the largest block, which makes index-space
-    ///   alignment coincide with PFN-space alignment (`zone_start_pfn` is
-    ///   `pageblock_nr_pages` aligned for the same reason);
+    /// - `base` is page aligned;
     /// - the managed range does not wrap around the top of the address
     ///   space of `A`.
+    ///
+    /// The arena no longer has to be as large as the largest block or
+    /// aligned to it: buddy alignment is computed in absolute PFN space, so
+    /// small and page-aligned-but-unaligned arenas are supported.
     ///
     /// Mirrors `free_area_init` and `zone_init_free_lists` for one zone.
     ///
@@ -327,9 +328,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         if page_size_usize == 0 || !page_size_usize.is_power_of_two() {
             return Err(Error::InvalidPageSize);
         }
-
-        let max_block = pages_in_order(Self::MAX_ORDER as u8);
-        if nr_pages < max_block {
+        if nr_pages == 0 {
             return Err(Error::InvalidGeometry);
         }
 
@@ -337,6 +336,12 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         // this rejects narrow address types whose `from_usize` saturates.
         let len = A::try_from_usize(nr_pages).ok_or(Error::InvalidGeometry)?;
 
+        // `base` must be page aligned; buddy alignment itself is computed
+        // in absolute PFN space, so it does not need the largest-block
+        // alignment the earlier implementation required.
+        if A::align_down(base, page_size) != base {
+            return Err(Error::InvalidGeometry);
+        }
         let base_pfn = A::phys_to_pfn(base, page_size);
 
         // The managed range may not wrap around the top of the address
@@ -347,18 +352,6 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         let max_pfn = A::phys_to_pfn(A::MAX, page_size);
         let last = len - A::from_usize(1);
         if base_pfn > max_pfn || max_pfn - base_pfn < last {
-            return Err(Error::InvalidGeometry);
-        }
-
-        // `base` must be aligned to the largest block. `pfn_to_phys` is
-        // exact here because a block is at most `nr_pages` pages, which the
-        // checks above proved representable.
-        let block_pfn = A::from_usize(max_block);
-        if block_pfn > max_pfn {
-            return Err(Error::InvalidGeometry);
-        }
-        let block_bytes = A::pfn_to_phys(block_pfn, page_size);
-        if A::align_down(base, block_bytes) != base {
             return Err(Error::InvalidGeometry);
         }
 
@@ -456,19 +449,62 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         self.index_of_pfn(A::phys_to_pfn(addr, self.page_size))
     }
 
+    /// Returns `(buddy_idx, merged_idx)` for the block at `idx` of `order`,
+    /// using absolute PFN alignment.
+    ///
+    /// Returns `None` when the buddy lies outside the arena. The arena base
+    /// does not need to be aligned to the block size; alignment is computed
+    /// from the absolute PFN, so small and unaligned arenas are supported.
+    fn buddy_indices(&self, idx: usize, order: u8) -> Option<(usize, usize)> {
+        let pfn = self.pfn_of_index(idx);
+        let block_pfn = A::from_usize(pages_in_order(order));
+
+        // Buddy pairs are aligned to `2 * block_pfn`. Compute the pair start
+        // in absolute PFN space; the arena base does not need to be aligned.
+        // When `2 * block_pfn` would overflow the address type, the only
+        // possible pair start is zero.
+        let pair_start = if block_pfn > A::MAX - block_pfn {
+            A::ZERO
+        } else {
+            A::align_down(pfn, block_pfn + block_pfn)
+        };
+        let offset = pfn - pair_start;
+
+        let (merged_pfn, buddy_pfn) = if offset < block_pfn {
+            // Lower half of the pair: the buddy starts one block later.
+            if pair_start > A::MAX - block_pfn {
+                return None;
+            }
+            (pair_start, pair_start + block_pfn)
+        } else {
+            // Upper half: the buddy is the lower half at the pair start.
+            (pair_start, pair_start)
+        };
+
+        let buddy_idx = self.index_of_pfn(buddy_pfn).ok()?;
+        let merged_idx = self.index_of_pfn(merged_pfn).ok()?;
+        Some((buddy_idx, merged_idx))
+    }
+
     /// Returns `true` if `idx` lies inside a free block.
     ///
-    /// A page is covered by a free block of order `k` if and only if
-    /// `idx & !((1 << k) - 1)` is a free head of order `k`; a block of a
-    /// smaller order cannot contain `idx` without starting at `idx`
-    /// itself, which the `k = 0` iteration catches. Used to reject ranges
-    /// that partially overlap memory that is already free.
+    /// A page is covered by a free block of order `k` if and only if the
+    /// absolute PFN rounded down to `1 << k` pages is a free head of order
+    /// `k`. Used to reject ranges that partially overlap memory that is
+    /// already free.
     ///
     /// Takes the descriptor slice rather than `&self` so that callers
     /// already holding it do not construct a second, aliasing one.
-    fn is_inside_free_block(pages: &[Page], idx: usize) -> bool {
-        for order in 0..NR_PAGE_ORDERS {
-            let head = idx & !(pages_in_order(order as u8) - 1);
+    fn is_inside_free_block(&self, pages: &[Page], idx: usize) -> bool {
+        let pfn = self.pfn_of_index(idx);
+        let max_order = (self.nr_pages.ilog2() as usize).min(Self::MAX_ORDER);
+
+        for order in 0..=max_order {
+            let block_pfn = A::from_usize(pages_in_order(order as u8));
+            let head_pfn = A::align_down(pfn, block_pfn);
+            let Ok(head) = self.index_of_pfn(head_pfn) else {
+                continue;
+            };
             let page = &pages[head];
             if page.is_free() && page.order as usize == order {
                 return true;
@@ -575,7 +611,15 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
         let idx = self.index_of_addr(addr)?;
         let block = pages_in_order(order);
-        if idx % block != 0 || idx + block > self.nr_pages {
+        let end = idx.checked_add(block).ok_or(Error::InvalidAddress)?;
+        if end > self.nr_pages {
+            return Err(Error::InvalidAddress);
+        }
+        // The block must be naturally aligned in absolute PFN space, not
+        // merely in index space.
+        let pfn = A::phys_to_pfn(addr, self.page_size);
+        let block_pfn = A::from_usize(block);
+        if A::align_down(pfn, block_pfn) != pfn {
             return Err(Error::InvalidAddress);
         }
 
@@ -599,8 +643,8 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// makes it safe to feed whole memory ranges discovered at boot.
     ///
     /// Mirrors `free_low_memory_core_early` and its helper
-    /// `__free_pages_memory`: the chunk order is limited by the index's
-    /// alignment (`__ffs(start)pfn`) and by the remaining length.
+    /// `__free_pages_memory`: the chunk order is limited by the absolute
+    /// PFN's alignment (`__ffs(start)pfn`) and by the remaining length.
     ///
     /// # Errors
     ///
@@ -632,14 +676,17 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
         while idx < end_idx {
             let remaining = end_idx - idx;
-            let mut order = idx.trailing_zeros();
+            let pfn = self.pfn_of_index(idx);
+            let mut order = 0u32;
             let max_order = Self::MAX_ORDER as u32;
-            if order > max_order {
-                order = max_order;
+            while order < max_order {
+                let next = pages_in_order((order + 1) as u8);
+                if next > remaining || A::align_down(pfn, A::from_usize(next)) != pfn {
+                    break;
+                }
+                order += 1;
             }
-            while pages_in_order(order as u8) > remaining {
-                order -= 1;
-            }
+            debug_assert!(pages_in_order(order as u8) <= remaining);
 
             self.free_one_page(pages, idx, order as u8)?;
             idx += pages_in_order(order as u8);
@@ -689,9 +736,12 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// Mirrors the kernel's `__free_one_page`. The caller must have
     /// verified that the block is fully free-able.
     fn free_one_page(&mut self, pages: &mut [Page], idx: usize, order: u8) -> Result<(), Error> {
-        debug_assert_eq!(idx % pages_in_order(order), 0);
+        debug_assert!(
+            A::align_down(self.pfn_of_index(idx), A::from_usize(pages_in_order(order)))
+                == self.pfn_of_index(idx)
+        );
 
-        if Self::is_inside_free_block(pages, idx) {
+        if self.is_inside_free_block(pages, idx) {
             return Err(Error::InvalidFree);
         }
         if pages[idx].refcount != 0 {
@@ -704,10 +754,9 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             // TODO(bitmap): consult the per-order buddy bitmap first, as
             // `buddy_merge_likely` does, to avoid touching a cache-cold
             // buddy page for every failed merge.
-            let buddy = idx ^ pages_in_order(order);
-            if buddy >= self.nr_pages {
+            let Some((buddy, merged)) = self.buddy_indices(idx, order) else {
                 break;
-            }
+            };
             let page = &pages[buddy];
             if !page.is_free() || page.order != order {
                 break;
@@ -715,7 +764,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
             self.areas[order as usize].remove(pages, buddy);
             self.nr_free -= pages_in_order(order);
-            idx &= buddy;
+            idx = merged;
             order += 1;
         }
 
@@ -765,7 +814,12 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
                 if count > self.nr_pages {
                     return Err(Error::CorruptFreeList);
                 }
-                if idx % block != 0 || idx + block > self.nr_pages {
+                if block > self.nr_pages || idx > self.nr_pages - block {
+                    return Err(Error::CorruptFreeList);
+                }
+                let pfn = self.pfn_of_index(idx);
+                let block_pfn = A::from_usize(block);
+                if A::align_down(pfn, block_pfn) != pfn {
                     return Err(Error::CorruptFreeList);
                 }
                 let page = &pages[idx];
@@ -784,8 +838,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             // `order + 1`, so they cannot exist below the largest order.
             if order + 1 < NR_PAGE_ORDERS {
                 for idx in self.areas[order].iter(pages) {
-                    let buddy = idx ^ block;
-                    if buddy < self.nr_pages {
+                    if let Some((buddy, _)) = self.buddy_indices(idx, order as u8) {
                         let page = &pages[buddy];
                         if page.is_free() && page.order as usize == order {
                             return Err(Error::Uncoalesced);
@@ -939,7 +992,7 @@ mod tests {
         // SAFETY: the pointer is valid; the geometry check fails before the
         // descriptors are touched.
         assert!(matches!(
-            unsafe { buddy.init(small_ptr, small.len(), 0, PS) },
+            unsafe { buddy.init(small_ptr, small.len(), PS / 2, PS) },
             Err(Error::InvalidGeometry)
         ));
         assert!(!buddy.is_initialized());
@@ -977,21 +1030,60 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_unaligned_base() {
+    fn new_accepts_page_aligned_base() {
         let mut pages = [Page::EMPTY; PAGES];
-        // The largest block spans MAX_BLOCK pages; a base that is only page
-        // aligned cannot express it.
-        assert!(matches!(
-            Buddy::<usize, NR_PAGE_ORDERS>::new(PS, PS, &mut pages),
-            Err(Error::InvalidGeometry)
-        ));
+        // Base is page aligned but not aligned to the largest block; buddy
+        // alignment is computed in absolute PFN space.
+        let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(PS, PS, &mut pages).unwrap();
+        assert_eq!(buddy.base(), PS);
+        buddy.free_range(PS, PS + PAGES * PS).unwrap();
+        assert_eq!(buddy.nr_free(), PAGES);
+
+        let addr = buddy.alloc_pages(2).unwrap();
+        assert_eq!(addr % (4 * PS), 0);
+        buddy.free_pages(addr, 2).unwrap();
+        buddy.validate().unwrap();
     }
 
     #[test]
-    fn new_rejects_arena_smaller_than_max_block() {
+    fn unaligned_base_allocates_and_coalesces_all_pages() {
+        let mut pages = [Page::EMPTY; PAGES];
+        let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(PS, PS, &mut pages).unwrap();
+        buddy.free_range(PS, PS + PAGES * PS).unwrap();
+
+        let mut live = Vec::new();
+        while let Ok(addr) = buddy.alloc_pages(0) {
+            live.push(addr);
+        }
+        assert_eq!(live.len(), PAGES);
+
+        for addr in live {
+            buddy.free_pages(addr, 0).unwrap();
+        }
+        assert_eq!(buddy.nr_free(), PAGES);
+        buddy.validate().unwrap();
+    }
+
+    #[test]
+    fn new_accepts_arena_smaller_than_max_block() {
         let mut pages = [Page::EMPTY; MAX_BLOCK - 1];
+        let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(0, PS, &mut pages).unwrap();
+        buddy.free_range(0, (MAX_BLOCK - 1) * PS).unwrap();
+        assert_eq!(buddy.nr_free(), MAX_BLOCK - 1);
+        // 31 pages split into 16 + 8 + 4 + 2 + 1.
+        assert_eq!(buddy.nr_free_blocks(4), Some(1));
+        assert_eq!(buddy.nr_free_blocks(5), Some(0));
+
+        let addr = buddy.alloc_pages(3).unwrap();
+        buddy.free_pages(addr, 3).unwrap();
+        buddy.validate().unwrap();
+    }
+
+    #[test]
+    fn new_rejects_non_page_aligned_base() {
+        let mut pages = [Page::EMPTY; PAGES];
         assert!(matches!(
-            Buddy::<usize, NR_PAGE_ORDERS>::new(0, PS, &mut pages),
+            Buddy::<usize, NR_PAGE_ORDERS>::new(PS / 2, PS, &mut pages),
             Err(Error::InvalidGeometry)
         ));
     }

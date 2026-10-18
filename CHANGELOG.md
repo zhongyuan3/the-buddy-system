@@ -29,6 +29,11 @@ All notable changes to this project are documented in this file.
   the free lists.
 - Arena validation uses the new `PageFrame::try_from_usize` instead of a
   manual `from_usize`/`try_to_usize` round trip.
+- **Arbitrary page-aligned arenas.** The base no longer has to be aligned to
+  the largest block and the arena may be smaller than `1 << MAX_ORDER`
+  pages. Buddy alignment and coalescing are computed in absolute PFN space;
+  only the arena base needs page alignment. `Buddy::free_pages` also checks
+  block alignment in PFN space rather than index space.
 
 ### Compatibility
 
