@@ -102,15 +102,11 @@ fn derived_type_works_with_raw_parts() {
 
 #[test]
 fn derived_type_works_with_memblock() {
-    use the_memblock::flags::MemblockFlags;
-    use the_memblock::memblock::Memblock;
+    use the_memblock::Memblock;
 
     let mut mb = Memblock::<Addr, 8>::new();
-    mb.add(Addr(0x1000), Addr(0x1000), MemblockFlags::NONE)
-        .unwrap();
-    let p = mb
-        .phys_alloc(Addr(0x100), Addr(0x100), MemblockFlags::NONE)
-        .unwrap();
+    mb.add(Addr(0x1000), Addr(0x1000)).unwrap();
+    let p = mb.phys_alloc(Addr(0x100), Addr(0x100)).unwrap();
     assert_eq!(p, Addr(0x1f00));
     assert!(mb.is_reserved(p));
     assert_eq!(mb.phys_mem_size(), Addr(0x1000));

@@ -36,6 +36,9 @@ All notable changes to this project are documented in this file.
   pages. Buddy alignment and coalescing are computed in absolute PFN space;
   only the arena base needs page alignment. `Buddy::free_pages` also checks
   block alignment in PFN space rather than index space.
+- The `the-memblock` dev-dependency is now `0.3.0`. Integration tests use
+  its crate-root exports and the flag-less `Memblock::add`; the custom
+  `RegionFlags` handoff test was removed along with that API.
 
 ### Compatibility
 

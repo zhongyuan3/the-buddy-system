@@ -146,11 +146,11 @@ which accepts any iterator of `(start, end)` pairs:
 ```rust
 use the_buddy_system::Buddy;
 use the_buddy_system::Page;
-use the_memblock::flags::MemblockFlags;
-use the_memblock::memblock::Memblock;
+use the_memblock::Memblock;
+use the_memblock::MemblockFlags;
 
 let mut mb = Memblock::<usize, 16>::new();
-mb.add(0x1_0000, 0x4_0000, MemblockFlags::NONE).unwrap();
+mb.add(0x1_0000, 0x4_0000).unwrap();
 mb.reserve_kern(0x1_0000, 0x2000).unwrap(); // kernel image
 
 let mut pages = vec![Page::EMPTY; 64];

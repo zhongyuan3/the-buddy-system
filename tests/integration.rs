@@ -8,9 +8,8 @@ use the_buddy_system::Buddy;
 use the_buddy_system::Error;
 use the_buddy_system::Page;
 use the_buddy_system::PageFrame;
-use the_memblock::flags::MemblockFlags;
-use the_memblock::flags::RegionFlags;
-use the_memblock::memblock::Memblock;
+use the_memblock::Memblock;
+use the_memblock::MemblockFlags;
 
 const PS: usize = 0x1000;
 const BASE: usize = 0x1_0000;
@@ -20,7 +19,7 @@ const NR_PAGE_ORDERS: usize = 4;
 #[test]
 fn boot_handoff_from_memblock_to_buddy() {
     let mut mb = Memblock::<usize, 16>::new();
-    mb.add(BASE, PAGES * PS, MemblockFlags::NONE).unwrap();
+    mb.add(BASE, PAGES * PS).unwrap();
     // The kernel image and a NOMAP page must not reach the buddy allocator.
     mb.reserve_kern(BASE, 2 * PS).unwrap();
     mb.mark_nomap(BASE + 0x2_0000, PS).unwrap();
@@ -53,7 +52,7 @@ fn boot_handoff_from_memblock_to_buddy() {
 #[test]
 fn feeding_the_same_free_ranges_twice_is_rejected() {
     let mut mb = Memblock::<usize, 16>::new();
-    mb.add(BASE, PAGES * PS, MemblockFlags::NONE).unwrap();
+    mb.add(BASE, PAGES * PS).unwrap();
 
     let mut pages = vec![Page::EMPTY; PAGES];
     let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
@@ -165,7 +164,7 @@ fn free_ranges_from_a_locked_static() {
     MEMBLOCK
         .lock()
         .unwrap()
-        .add(BASE, 32 * PS, MemblockFlags::NONE)
+        .add(BASE, 32 * PS)
         .unwrap();
 
     let mut pages = vec![Page::EMPTY; PAGES];
@@ -188,7 +187,7 @@ fn free_ranges_can_snapshot_before_releasing_the_memblock_lock() {
     MEMBLOCK
         .lock()
         .unwrap()
-        .add(BASE, 32 * PS, MemblockFlags::NONE)
+        .add(BASE, 32 * PS)
         .unwrap();
 
     // Snapshot the ranges while the memblock lock is held...
@@ -206,67 +205,5 @@ fn free_ranges_can_snapshot_before_releasing_the_memblock_lock() {
     let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
     buddy.free_ranges(ranges).unwrap();
     assert_eq!(buddy.nr_free(), 32);
-    buddy.validate().unwrap();
-}
-
-/// A minimal custom region flag set, to prove that the handoff follows the
-/// memblock iterator's `RegionFlags` filtering policy.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct CustomFlags(u8);
-
-impl core::ops::BitOr for CustomFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
-    }
-}
-
-impl core::ops::BitAnd for CustomFlags {
-    type Output = Self;
-    fn bitand(self, rhs: Self) -> Self {
-        Self(self.0 & rhs.0)
-    }
-}
-
-impl core::ops::Not for CustomFlags {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(!self.0)
-    }
-}
-
-impl RegionFlags for CustomFlags {
-    const NONE: Self = Self(0);
-
-    fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    fn intersection(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-
-    fn difference(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
-    }
-
-    fn should_skip(_region: Self, _requested: Self) -> bool {
-        false
-    }
-}
-
-#[test]
-fn free_ranges_accepts_custom_region_flags() {
-    let mut mb = Memblock::<usize, 16, CustomFlags>::new();
-    mb.add(BASE, 32 * PS, CustomFlags::NONE).unwrap();
-    mb.reserve(BASE, 2 * PS).unwrap();
-
-    let mut pages = vec![Page::EMPTY; PAGES];
-    let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
-    buddy
-        .free_ranges(mb.free_mem_ranges(CustomFlags::NONE))
-        .unwrap();
-
-    assert_eq!(buddy.nr_free(), 30);
     buddy.validate().unwrap();
 }
