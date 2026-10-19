@@ -196,7 +196,7 @@ indexing use `usize` index space, while buddy alignment and coalescing are
 computed in absolute PFN space. The arena base therefore only needs page
 alignment, not alignment to the largest block.
 
-[`PageFrame`]: https://docs.rs/the-buddy-system/latest/the_buddy_system/pfn/trait.PageFrame.html
+[`PageFrame`]: https://docs.rs/the-mm-core/latest/the_mm_core/trait.PageFrame.html
 [`PhysAddr`]: https://docs.rs/the-mm-core/latest/the_mm_core/trait.PhysAddr.html
 
 ## Testing

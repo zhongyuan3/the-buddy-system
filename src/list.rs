@@ -1,4 +1,4 @@
-//! The index-based free list used by each [`FreeArea`].
+//! The index-based free list used by each free area.
 //!
 //! Mirrors the kernel's `struct list_head buddy_list` embedded in
 //! `struct page`: nodes are identified by their index into the page

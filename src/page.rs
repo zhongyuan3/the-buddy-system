@@ -28,7 +28,7 @@ bitflags! {
 /// - `refcount` mirrors `page->_refcount`. The buddy allocator sets it to
 ///   one when a block is handed out and requires it to be one when the
 ///   block is returned, which turns double frees into
-///   [`Error::InvalidFree`](crate::error::Error::InvalidFree).
+///   [`Error::InvalidFree`](crate::Error::InvalidFree).
 /// - `next`/`prev` mirror the `page->buddy_list` links. Instead of raw
 ///   pointers they store niche-optimized optional page indices (`Link`
 ///   biases the index by one so `Option<Link>` is one machine word),
@@ -72,8 +72,8 @@ impl Page {
     ///
     /// For the head of a free block this is the block's order. For the head
     /// of an allocated block it is the order the block was allocated with,
-    /// which lets [`Buddy::free_pages`](crate::buddy::Buddy::free_pages)
-    /// reject a free with the wrong order.
+    /// which lets [`Buddy::free_pages`](crate::Buddy::free_pages) reject a
+    /// free with the wrong order.
     pub const fn order(&self) -> u8 {
         self.order
     }
@@ -93,6 +93,26 @@ impl Default for Page {
     fn default() -> Self {
         Self::EMPTY
     }
+}
+
+/// Returns the number of pages in a block of `order`, i.e. `1 << order`.
+///
+/// Mirrors the kernel's block sizes derived from `MAX_PAGE_ORDER` /
+/// `NR_PAGE_ORDERS`, such as `MAX_ORDER_NR_PAGES`.
+///
+/// # Panics
+///
+/// Panics if `order >= usize::BITS`.
+pub const fn pages_in_order(order: u8) -> usize {
+    1usize << order
+}
+
+/// Returns the number of pages in the largest block an arena with the given
+/// (inclusive) `MAX_ORDER` can allocate, i.e. `1 << MAX_ORDER`.
+///
+/// Mirrors the kernel's `MAX_ORDER_NR_PAGES`.
+pub const fn max_block_pages(max_order: u8) -> usize {
+    pages_in_order(max_order)
 }
 
 #[cfg(test)]
@@ -131,5 +151,22 @@ mod tests {
         let mut c = Page::EMPTY;
         c.refcount = 1;
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn pages_in_order_is_a_power_of_two() {
+        assert_eq!(pages_in_order(0), 1);
+        assert_eq!(pages_in_order(1), 2);
+        assert_eq!(pages_in_order(3), 8);
+        assert_eq!(pages_in_order(10), 1024);
+        assert_eq!(pages_in_order(12), 4096);
+    }
+
+    #[test]
+    fn max_block_pages_matches_buddy_orders() {
+        // MAX_ORDER is inclusive, so 1 << MAX_ORDER is the largest block.
+        assert_eq!(max_block_pages(0), 1);
+        assert_eq!(max_block_pages(3), 8);
+        assert_eq!(max_block_pages(10), 1024);
     }
 }

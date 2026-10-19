@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Flattened the module layout.** Public items are exported only from the
+  crate root. The `error`, `order` and `pfn` modules were removed: `Error`
+  lives in `buddy.rs`, the order helpers live in `page.rs`, and
+  `PageFrame` is re-exported directly from `the-mm-core`. `FreeArea` is now
+  internal to `buddy.rs`.
 - **No memblock dependency at all.** The `memblock` feature,
   `Buddy::free_memblock` and the `memblock` module were removed. The boot
   handoff is explicit:
@@ -29,8 +34,8 @@ All notable changes to this project are documented in this file.
   the free lists.
 - Arena validation uses the new `PageFrame::try_from_usize` instead of a
   manual `from_usize`/`try_to_usize` round trip.
-- The `free_area` module is now private. `Buddy::nr_free_blocks` remains the
-  public introspection API for per-order free counts.
+- `Buddy::nr_free_blocks` remains the public introspection API for
+  per-order free counts; `FreeArea` is internal to `buddy.rs`.
 - **Arbitrary page-aligned arenas.** The base no longer has to be aligned to
   the largest block and the arena may be smaller than `1 << MAX_ORDER`
   pages. Buddy alignment and coalescing are computed in absolute PFN space;

@@ -83,19 +83,16 @@
 #![no_std]
 
 pub use crate::buddy::Buddy;
-pub use crate::error::Error;
+pub use crate::buddy::Error;
+pub use crate::page::max_block_pages;
+pub use crate::page::pages_in_order;
 pub use crate::page::Page;
 pub use crate::page::PageFlags;
-pub use crate::pfn::PageFrame;
 pub use the_buddy_system_derive::PageFrame;
 pub use the_mm_core;
+pub use the_mm_core::pfn::PageFrame;
 pub use the_mm_core::PhysAddr;
 
-pub mod buddy;
-pub mod error;
-mod free_area;
-pub mod order;
-pub mod page;
-pub mod pfn;
-
-pub(crate) mod list;
+mod buddy;
+mod list;
+mod page;

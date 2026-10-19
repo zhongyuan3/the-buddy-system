@@ -18,12 +18,160 @@ use core::marker::PhantomData;
 use core::mem::align_of;
 use core::ptr::NonNull;
 
-use crate::error::Error;
-use crate::free_area::FreeArea;
-use crate::order::pages_in_order;
+use crate::list::FreeList;
+use crate::list::FreeListIter;
+use crate::page::pages_in_order;
 use crate::page::Page;
 use crate::page::PageFlags;
-use crate::pfn::PageFrame;
+use crate::PageFrame;
+
+/// Errors returned by the buddy allocator.
+///
+/// The variants mirror the failure modes the kernel's page allocator
+/// asserts on (`bad_page`, `VM_BUG_ON_PAGE`, `check_new_page`) and the
+/// `NULL`/`-ENOMEM` result of `__rmqueue`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// No free block of the requested order (or any larger order) exists.
+    OutOfMemory,
+    /// The requested order is above `MAX_ORDER` (`NR_PAGE_ORDERS - 1`).
+    InvalidOrder,
+    /// The address is misaligned, does not denote the start of a block, or
+    /// lies outside the managed range.
+    InvalidAddress,
+    /// The block may not be freed: it is already free, in use, the freed
+    /// range overlaps pages that are not free, or the order does not match
+    /// the order the block was allocated with. Also reported when a free
+    /// range overlaps an already freed region.
+    InvalidFree,
+    /// The page size is zero, not a power of two, or not representable.
+    InvalidPageSize,
+    /// The page descriptor array is unusable, for example because the
+    /// pointer passed to [`Buddy::from_raw_parts`] is not aligned to
+    /// [`Page`].
+    InvalidPageArray,
+    /// An operation that needs page descriptors was attempted on an
+    /// allocator created by [`Buddy::uninit`] whose [`Buddy::init`] has not
+    /// run yet.
+    Uninitialized,
+    /// [`Buddy::init`] was called on an allocator that already manages
+    /// pages.
+    AlreadyInitialized,
+    /// The arena geometry is invalid: fewer pages than `1 << MAX_ORDER`,
+    /// a base address not aligned to the largest block, or an address range
+    /// that would wrap around the top of the address space.
+    InvalidGeometry,
+    /// A free list is corrupted: a listed block is misaligned, not marked
+    /// free, carries the wrong order, or is not linked where it is listed.
+    CorruptFreeList,
+    /// Two buddy blocks are free at the same order; coalescing failed.
+    Uncoalesced,
+    /// The free page accounting does not match the free lists.
+    CountMismatch,
+    /// An invariant was violated; indicates a bug in the implementation.
+    InternalError,
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let s = match self {
+            Error::OutOfMemory => "Out of memory",
+            Error::InvalidOrder => "Invalid order",
+            Error::InvalidAddress => "Invalid address",
+            Error::InvalidFree => "Invalid free",
+            Error::InvalidPageSize => "Invalid page size",
+            Error::InvalidPageArray => "Invalid page descriptor array",
+            Error::InvalidGeometry => "Invalid geometry",
+            Error::Uninitialized => "Allocator is not initialized",
+            Error::AlreadyInitialized => "Allocator is already initialized",
+            Error::CorruptFreeList => "Corrupted free list",
+            Error::Uncoalesced => "Uncoalesced buddies",
+            Error::CountMismatch => "Free page count mismatch",
+            Error::InternalError => "Internal error",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl core::error::Error for Error {}
+
+/// The free list of one order, mirroring `struct free_area`
+/// (`include/linux/mmzone.h`).
+///
+/// The kernel's `free_area` holds one list per migration type; migration
+/// types are not implemented yet, so a single list is kept. Adding them
+/// later only turns `free_list` into an array and requires a migration type
+/// argument in the allocator, exactly like `migratetype` in
+/// `__rmqueue_smallest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FreeArea {
+    // TODO(migratetype): split into `free_list: [FreeList; MIGRATE_TYPES]`,
+    // one list per migration type, exactly like the kernel's
+    // `struct free_area`; `alloc_pages` then needs the `__rmqueue_fallback`
+    // walk over the remaining lists.
+    pub(crate) free_list: FreeList,
+    pub(crate) nr_free: usize,
+    // TODO(bitmap): add the per-order bitmap of buddy pairs
+    // (`free_area.bitmap`), consulted by `buddy_merge_likely` to skip
+    // cache-cold buddy checks during coalescing.
+}
+
+impl FreeArea {
+    pub(crate) const fn new() -> Self {
+        Self {
+            free_list: FreeList::new(),
+            nr_free: 0,
+        }
+    }
+
+    /// Returns the number of free blocks of this order.
+    ///
+    /// Counts *blocks*, not pages, exactly like the kernel's
+    /// `free_area.nr_free` (the value shown per order by `/proc/buddyinfo`).
+    /// The page count is tracked by [`Buddy::nr_free`].
+    pub(crate) const fn nr_free(&self) -> usize {
+        self.nr_free
+    }
+
+    /// Pushes a block head at the front of the list and bumps the count.
+    pub(crate) fn push_front(&mut self, pages: &mut [Page], idx: usize) {
+        self.free_list.push_front(pages, idx);
+        self.nr_free += 1;
+    }
+
+    /// Unlinks a block head and drops the count.
+    ///
+    /// Clearing the `BUDDY` flag and the order mirrors the kernel's
+    /// `del_page_from_free_list` (`__ClearPageBuddy` plus
+    /// `set_page_private(page, 0)`).
+    pub(crate) fn remove(&mut self, pages: &mut [Page], idx: usize) {
+        debug_assert!(pages[idx].is_free());
+        self.free_list.remove(pages, idx);
+        self.nr_free -= 1;
+        clear_free_head(&mut pages[idx]);
+    }
+
+    /// Pops the front block head of the given `order`, if any.
+    pub(crate) fn pop_front(&mut self, pages: &mut [Page], order: usize) -> Option<usize> {
+        let idx = self.free_list.pop_front(pages)?;
+        debug_assert!(pages[idx].is_free());
+        debug_assert_eq!(pages[idx].order as usize, order);
+        self.nr_free -= 1;
+        clear_free_head(&mut pages[idx]);
+        Some(idx)
+    }
+
+    /// Iterates the block heads of this order, front to back.
+    pub(crate) fn iter<'p>(&self, pages: &'p [Page]) -> FreeListIter<'p> {
+        self.free_list.iter(pages)
+    }
+}
+
+/// Clears the free-head state of an unlinked block head.
+fn clear_free_head(page: &mut Page) {
+    page.flags.remove(PageFlags::BUDDY);
+    page.order = 0;
+}
 
 /// A buddy allocator managing a contiguous range of physical page frames.
 ///
@@ -911,6 +1059,7 @@ impl<A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'static, A, NR_PAGE_ORDERS
 mod tests {
     extern crate alloc;
 
+    use alloc::string::ToString;
     use alloc::vec::Vec;
 
     use super::*;
@@ -1439,5 +1588,57 @@ mod tests {
         buddy.free_pages(addr, 2).unwrap();
         assert_eq!(buddy.nr_free(), PAGES);
         buddy.validate().unwrap();
+    }
+
+    #[test]
+    fn error_is_copy_and_eq() {
+        let e = Error::OutOfMemory;
+        let copy = e;
+        assert_eq!(e, copy);
+        assert_ne!(Error::OutOfMemory, Error::InvalidOrder);
+    }
+
+    #[test]
+    fn display_covers_all_variants() {
+        assert_eq!(Error::OutOfMemory.to_string().as_str(), "Out of memory");
+        assert_eq!(Error::InvalidOrder.to_string().as_str(), "Invalid order");
+        assert_eq!(
+            Error::InvalidAddress.to_string().as_str(),
+            "Invalid address"
+        );
+        assert_eq!(Error::InvalidFree.to_string().as_str(), "Invalid free");
+        assert_eq!(
+            Error::InvalidPageSize.to_string().as_str(),
+            "Invalid page size"
+        );
+        assert_eq!(
+            Error::InvalidPageArray.to_string().as_str(),
+            "Invalid page descriptor array"
+        );
+        assert_eq!(
+            Error::InvalidGeometry.to_string().as_str(),
+            "Invalid geometry"
+        );
+        assert_eq!(
+            Error::Uninitialized.to_string().as_str(),
+            "Allocator is not initialized"
+        );
+        assert_eq!(
+            Error::AlreadyInitialized.to_string().as_str(),
+            "Allocator is already initialized"
+        );
+        assert_eq!(
+            Error::CorruptFreeList.to_string().as_str(),
+            "Corrupted free list"
+        );
+        assert_eq!(
+            Error::Uncoalesced.to_string().as_str(),
+            "Uncoalesced buddies"
+        );
+        assert_eq!(
+            Error::CountMismatch.to_string().as_str(),
+            "Free page count mismatch"
+        );
+        assert_eq!(Error::InternalError.to_string().as_str(), "Internal error");
     }
 }
