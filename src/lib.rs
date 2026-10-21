@@ -84,14 +84,14 @@
 
 pub use crate::buddy::Buddy;
 pub use crate::buddy::Error;
-pub use crate::page::max_block_pages;
-pub use crate::page::pages_in_order;
 pub use crate::page::Page;
 pub use crate::page::PageFlags;
+pub use crate::page::max_block_pages;
+pub use crate::page::pages_in_order;
 pub use the_buddy_system_derive::PageFrame;
 pub use the_mm_core;
-pub use the_mm_core::pfn::PageFrame;
 pub use the_mm_core::PhysAddr;
+pub use the_mm_core::pfn::PageFrame;
 
 mod buddy;
 mod list;

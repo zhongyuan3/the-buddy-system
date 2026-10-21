@@ -60,89 +60,93 @@ impl FreeList {
         Self { head: None }
     }
 
-    /// Inserts `idx` at the front (mirrors `list_add`).
-    pub(crate) fn push_front(&mut self, pages: &mut [Page], idx: usize) {
-        debug_assert!(idx < pages.len());
-        let link = Link::new(idx);
+    /// Inserts `index` at the front (mirrors `list_add`).
+    pub(crate) fn push_front(&mut self, descriptors: &mut [Page], index: usize) {
+        debug_assert!(index < descriptors.len());
+        let link = Link::new(index);
 
         match self.head {
             None => {
-                pages[idx].next = Some(link);
-                pages[idx].prev = Some(link);
+                descriptors[index].next = Some(link);
+                descriptors[index].prev = Some(link);
             }
             Some(head) => {
-                let tail = pages[head.index()].prev.expect("linked node has a prev");
-                pages[idx].next = Some(head);
-                pages[idx].prev = Some(tail);
-                pages[head.index()].prev = Some(link);
-                pages[tail.index()].next = Some(link);
+                let tail = descriptors[head.index()]
+                    .prev
+                    .expect("linked node has a prev");
+                descriptors[index].next = Some(head);
+                descriptors[index].prev = Some(tail);
+                descriptors[head.index()].prev = Some(link);
+                descriptors[tail.index()].next = Some(link);
             }
         }
 
         self.head = Some(link);
     }
 
-    /// Inserts `idx` at the back (mirrors `list_add_tail`).
+    /// Inserts `index` at the back (mirrors `list_add_tail`).
     ///
     /// TODO(antifrag): the allocator currently always inserts at the
     /// front; use this for the kernel's `buddy_merge_likely` placement
     /// policy (`add_to_free_list_tail`).
     #[allow(dead_code)]
-    pub(crate) fn push_back(&mut self, pages: &mut [Page], idx: usize) {
-        debug_assert!(idx < pages.len());
-        let link = Link::new(idx);
+    pub(crate) fn push_back(&mut self, descriptors: &mut [Page], index: usize) {
+        debug_assert!(index < descriptors.len());
+        let link = Link::new(index);
 
         match self.head {
             None => {
-                pages[idx].next = Some(link);
-                pages[idx].prev = Some(link);
+                descriptors[index].next = Some(link);
+                descriptors[index].prev = Some(link);
                 self.head = Some(link);
             }
             Some(head) => {
-                let tail = pages[head.index()].prev.expect("linked node has a prev");
-                pages[idx].next = Some(head);
-                pages[idx].prev = Some(tail);
-                pages[head.index()].prev = Some(link);
-                pages[tail.index()].next = Some(link);
+                let tail = descriptors[head.index()]
+                    .prev
+                    .expect("linked node has a prev");
+                descriptors[index].next = Some(head);
+                descriptors[index].prev = Some(tail);
+                descriptors[head.index()].prev = Some(link);
+                descriptors[tail.index()].next = Some(link);
             }
         }
     }
 
-    /// Unlinks `idx`, which must currently be on this list (mirrors
+    /// Unlinks `index`, which must currently be on this list (mirrors
     /// `list_del`).
-    pub(crate) fn remove(&mut self, pages: &mut [Page], idx: usize) {
-        debug_assert!(idx < pages.len());
-        let link = Link::new(idx);
-        let next = pages[idx].next.expect("removed node is linked");
-        let prev = pages[idx].prev.expect("removed node is linked");
+    pub(crate) fn remove(&mut self, descriptors: &mut [Page], index: usize) {
+        debug_assert!(index < descriptors.len());
+        let link = Link::new(index);
+        let next = descriptors[index].next.expect("removed node is linked");
+        let prev = descriptors[index].prev.expect("removed node is linked");
 
         if next == link {
             debug_assert_eq!(self.head, Some(link));
             self.head = None;
         } else {
-            pages[next.index()].prev = Some(prev);
-            pages[prev.index()].next = Some(next);
+            descriptors[next.index()].prev = Some(prev);
+            descriptors[prev.index()].next = Some(next);
             if self.head == Some(link) {
                 self.head = Some(next);
             }
         }
 
-        pages[idx].next = None;
-        pages[idx].prev = None;
+        descriptors[index].next = None;
+        descriptors[index].prev = None;
     }
 
     /// Removes and returns the front node.
-    pub(crate) fn pop_front(&mut self, pages: &mut [Page]) -> Option<usize> {
+    pub(crate) fn pop_front(&mut self, descriptors: &mut [Page]) -> Option<usize> {
         let head = self.head?;
-        let idx = head.index();
-        self.remove(pages, idx);
-        Some(idx)
+        let index = head.index();
+        self.remove(descriptors, index);
+        Some(index)
     }
 
     /// Iterates the list from front to back.
-    pub(crate) fn iter<'p>(&self, pages: &'p [Page]) -> FreeListIter<'p> {
+    pub(crate) fn iter<'p>(&self, descriptors: &'p [Page]) -> FreeListIter<'p> {
         FreeListIter {
-            pages,
+            descriptors,
             head: self.head,
             next: self.head,
         }
@@ -152,7 +156,7 @@ impl FreeList {
 /// Iterator over the page indices of a [`FreeList`].
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FreeListIter<'p> {
-    pages: &'p [Page],
+    descriptors: &'p [Page],
     head: Option<Link>,
     next: Option<Link>,
 }
@@ -162,14 +166,16 @@ impl Iterator for FreeListIter<'_> {
 
     fn next(&mut self) -> Option<usize> {
         let current = self.next?;
-        let idx = current.index();
-        let following = self.pages[idx].next.expect("linked node has a next");
+        let index = current.index();
+        let following = self.descriptors[index]
+            .next
+            .expect("linked node has a next");
         self.next = if Some(following) == self.head {
             None
         } else {
             Some(following)
         };
-        Some(idx)
+        Some(index)
     }
 }
 
@@ -256,8 +262,8 @@ mod tests {
     fn remove_front_middle_back() {
         let mut list = FreeList::new();
         let mut pages = pages();
-        for idx in 0..5 {
-            list.push_back(&mut pages, idx);
+        for index in 0..5 {
+            list.push_back(&mut pages, index);
         }
         list.remove(&mut pages, 0);
         assert_eq!(collect(&list, &pages), vec![1, 2, 3, 4]);

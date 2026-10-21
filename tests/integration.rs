@@ -73,9 +73,7 @@ fn wide_physical_addresses_above_usize_range() {
     let base = 0x1_0000_0000u64;
     let mut pages = vec![Page::EMPTY; PAGES];
     let mut buddy = Buddy::<u64, NR_PAGE_ORDERS>::new(base, PS as u64, &mut pages).unwrap();
-    buddy
-        .free_range(base, base + (PAGES * PS) as u64)
-        .unwrap();
+    buddy.free_range(base, base + (PAGES * PS) as u64).unwrap();
     assert_eq!(buddy.nr_free(), PAGES);
 
     let addr = buddy.alloc_pages(2).unwrap();
@@ -161,11 +159,7 @@ fn free_ranges_from_a_locked_static() {
     // so there is no `&mut Memblock` to take.
     static MEMBLOCK: Mutex<Memblock<usize, 16>> = Mutex::new(Memblock::new());
 
-    MEMBLOCK
-        .lock()
-        .unwrap()
-        .add(BASE, 32 * PS)
-        .unwrap();
+    MEMBLOCK.lock().unwrap().add(BASE, 32 * PS).unwrap();
 
     let mut pages = vec![Page::EMPTY; PAGES];
     let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::new(BASE, PS, &mut pages).unwrap();
@@ -184,11 +178,7 @@ fn free_ranges_from_a_locked_static() {
 fn free_ranges_can_snapshot_before_releasing_the_memblock_lock() {
     static MEMBLOCK: Mutex<Memblock<usize, 16>> = Mutex::new(Memblock::new());
 
-    MEMBLOCK
-        .lock()
-        .unwrap()
-        .add(BASE, 32 * PS)
-        .unwrap();
+    MEMBLOCK.lock().unwrap().add(BASE, 32 * PS).unwrap();
 
     // Snapshot the ranges while the memblock lock is held...
     let ranges = {

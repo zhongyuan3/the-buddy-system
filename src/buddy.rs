@@ -18,12 +18,12 @@ use core::marker::PhantomData;
 use core::mem::align_of;
 use core::ptr::NonNull;
 
+use crate::PageFrame;
 use crate::list::FreeList;
 use crate::list::FreeListIter;
-use crate::page::pages_in_order;
 use crate::page::Page;
 use crate::page::PageFlags;
-use crate::PageFrame;
+use crate::page::pages_in_order;
 
 /// Errors returned by the buddy allocator.
 ///
@@ -55,11 +55,11 @@ pub enum Error {
     /// run yet.
     Uninitialized,
     /// [`Buddy::init`] was called on an allocator that already manages
-    /// pages.
+    /// descriptors.
     AlreadyInitialized,
-    /// The arena geometry is invalid: fewer pages than `1 << MAX_ORDER`,
-    /// a base address not aligned to the largest block, or an address range
-    /// that would wrap around the top of the address space.
+    /// The arena geometry is invalid: an empty descriptor array, a base
+    /// address that is not page aligned, or an address range that would
+    /// wrap around the top of the address space.
     InvalidGeometry,
     /// A free list is corrupted: a listed block is misaligned, not marked
     /// free, carries the wrong order, or is not linked where it is listed.
@@ -134,8 +134,8 @@ impl FreeArea {
     }
 
     /// Pushes a block head at the front of the list and bumps the count.
-    pub(crate) fn push_front(&mut self, pages: &mut [Page], idx: usize) {
-        self.free_list.push_front(pages, idx);
+    pub(crate) fn push_front(&mut self, descriptors: &mut [Page], index: usize) {
+        self.free_list.push_front(descriptors, index);
         self.nr_free += 1;
     }
 
@@ -144,26 +144,26 @@ impl FreeArea {
     /// Clearing the `BUDDY` flag and the order mirrors the kernel's
     /// `del_page_from_free_list` (`__ClearPageBuddy` plus
     /// `set_page_private(page, 0)`).
-    pub(crate) fn remove(&mut self, pages: &mut [Page], idx: usize) {
-        debug_assert!(pages[idx].is_free());
-        self.free_list.remove(pages, idx);
+    pub(crate) fn remove(&mut self, descriptors: &mut [Page], index: usize) {
+        debug_assert!(descriptors[index].is_free());
+        self.free_list.remove(descriptors, index);
         self.nr_free -= 1;
-        clear_free_head(&mut pages[idx]);
+        clear_free_head(&mut descriptors[index]);
     }
 
     /// Pops the front block head of the given `order`, if any.
-    pub(crate) fn pop_front(&mut self, pages: &mut [Page], order: usize) -> Option<usize> {
-        let idx = self.free_list.pop_front(pages)?;
-        debug_assert!(pages[idx].is_free());
-        debug_assert_eq!(pages[idx].order as usize, order);
+    pub(crate) fn pop_front(&mut self, descriptors: &mut [Page], order: usize) -> Option<usize> {
+        let index = self.free_list.pop_front(descriptors)?;
+        debug_assert!(descriptors[index].is_free());
+        debug_assert_eq!(descriptors[index].order as usize, order);
         self.nr_free -= 1;
-        clear_free_head(&mut pages[idx]);
-        Some(idx)
+        clear_free_head(&mut descriptors[index]);
+        Some(index)
     }
 
     /// Iterates the block heads of this order, front to back.
-    pub(crate) fn iter<'p>(&self, pages: &'p [Page]) -> FreeListIter<'p> {
-        self.free_list.iter(pages)
+    pub(crate) fn iter<'p>(&self, descriptors: &'p [Page]) -> FreeListIter<'p> {
+        self.free_list.iter(descriptors)
     }
 }
 
@@ -175,7 +175,7 @@ fn clear_free_head(page: &mut Page) {
 
 /// A buddy allocator managing a contiguous range of physical page frames.
 ///
-/// The allocator manages `nr_pages` page frames starting at `base`. The
+/// The allocator manages `nr_pages` page frames starting at `arena_base`. The
 /// descriptors are supplied by the caller (the counterpart of the kernel's
 /// `vmemmap`/`mem_map` array), so the allocator itself never allocates and
 /// a kernel can place the array wherever its early boot code reserved room
@@ -235,7 +235,7 @@ fn clear_free_head(page: &mut Page) {
 /// `A` is the physical address type. As in the kernel, where `phys_addr_t`
 /// can be wider than a pointer (`CONFIG_PHYS_ADDR_T_64BIT` on 32-bit x86
 /// with PAE), absolute addresses are never narrowed to `usize`: only page
-/// offsets relative to `base` are, through the checked
+/// offsets relative to `arena_base` are, through the checked
 /// [`PageFrame::try_to_usize`]. Array indexing uses `usize` index space,
 /// while buddy alignment and coalescing are computed in absolute PFN space,
 /// so the arena base only needs page alignment.
@@ -253,8 +253,8 @@ fn clear_free_head(page: &mut Page) {
 /// use the_buddy_system::Buddy;
 /// use the_buddy_system::Page;
 ///
-/// let mut pages = [Page::EMPTY; 64];
-/// let mut buddy = Buddy::<u64, 4>::new(0, 0x1000, &mut pages).unwrap();
+/// let mut descriptors = [Page::EMPTY; 64];
+/// let mut buddy = Buddy::<u64, 4>::new(0, 0x1000, &mut descriptors).unwrap();
 ///
 /// // Feed the arena the memory that is actually free.
 /// buddy.free_range(0, 64 * 0x1000).unwrap();
@@ -276,7 +276,7 @@ pub struct Buddy<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> {
     /// Address of the page descriptor array (the `vmemmap` counterpart).
     /// The slice is never stored; each method rebuilds it from this pointer
     /// through `pages_mut`/`pages_ref`.
-    pages: NonNull<Page>,
+    descriptors: NonNull<Page>,
     /// Number of page descriptors, i.e. the array length.
     nr_pages: usize,
     /// Whether a constructor or [`Buddy::init`] has supplied a descriptor
@@ -288,7 +288,7 @@ pub struct Buddy<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> {
     nr_free: usize,
     /// Marker for the borrow held by [`Buddy::new`]; raw construction
     /// ([`Buddy::from_raw_parts`]) uses `'static`.
-    _pages: PhantomData<&'a mut [Page]>,
+    _descriptors: PhantomData<&'a mut [Page]>,
 }
 
 // SAFETY: `Buddy` holds no thread-affine state, and the descriptor array is
@@ -311,12 +311,12 @@ unsafe impl<A: PageFrame + Send, const NR_PAGE_ORDERS: usize> Send
 ///
 /// # Safety
 ///
-/// `ptr` must point to `len` initialized, properly aligned `Page`
-/// descriptors that are not reached through any other alias while the
+/// `descriptors` must point to `nr_pages` initialized, properly aligned
+/// `Page` descriptors that are not reached through any other alias while the
 /// returned reference is alive.
-unsafe fn pages_mut<'p>(ptr: NonNull<Page>, len: usize) -> &'p mut [Page] {
+unsafe fn pages_mut<'p>(descriptors: NonNull<Page>, nr_pages: usize) -> &'p mut [Page] {
     // SAFETY: the caller guarantees pointer validity and exclusivity.
-    unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), len) }
+    unsafe { core::slice::from_raw_parts_mut(descriptors.as_ptr(), nr_pages) }
 }
 
 /// Like [`pages_mut`], for read-only access.
@@ -325,9 +325,9 @@ unsafe fn pages_mut<'p>(ptr: NonNull<Page>, len: usize) -> &'p mut [Page] {
 ///
 /// Same contract as [`pages_mut`]; the caller must additionally serialize
 /// against writers.
-unsafe fn pages_ref<'p>(ptr: NonNull<Page>, len: usize) -> &'p [Page] {
+unsafe fn pages_ref<'p>(descriptors: NonNull<Page>, nr_pages: usize) -> &'p [Page] {
     // SAFETY: the caller guarantees pointer validity.
-    unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) }
+    unsafe { core::slice::from_raw_parts(descriptors.as_ptr(), nr_pages) }
 }
 
 impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS> {
@@ -342,9 +342,9 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// the value is used.
     pub const MAX_ORDER: usize = NR_PAGE_ORDERS.saturating_sub(1);
 
-    /// Creates an allocator managing the page frames of `pages`.
+    /// Creates an allocator over the page descriptor array `descriptors`.
     ///
-    /// `base` is the physical address of the first managed page and
+    /// `arena_base` is the physical address of the first managed page and
     /// `page_size` its size. All descriptors are reset to [`Page::EMPTY`];
     /// no page is free until a range is handed to [`Buddy::free_range`] or
     /// [`Buddy::free_ranges`], mirroring the kernel, where memory is only
@@ -360,7 +360,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// - the descriptor array holds at least one page;
     /// - its length survives a `from_usize`/`try_to_usize` round trip, so
     ///   every index is exact;
-    /// - `base` is page aligned;
+    /// - `arena_base` is page aligned;
     /// - the managed range does not wrap around the top of the address
     ///   space of `A`.
     ///
@@ -376,23 +376,25 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// power of two, or not representable as `usize`;
     /// [`Error::InvalidGeometry`] if any of the geometry invariants above
     /// is violated.
-    pub fn new(base: A, page_size: A, pages: &'a mut [Page]) -> Result<Self, Error> {
-        let nr_pages = pages.len();
+    pub fn new(arena_base: A, page_size: A, descriptors: &'a mut [Page]) -> Result<Self, Error> {
+        let nr_pages = descriptors.len();
         if nr_pages == 0 {
             return Err(Error::InvalidGeometry);
         }
-        let ptr = NonNull::new(pages.as_mut_ptr()).expect("slice pointers are never null");
+        let descriptors_ptr =
+            NonNull::new(descriptors.as_mut_ptr()).expect("slice pointers are never null");
 
         let mut buddy = Self::uninit();
-        // SAFETY: `pages` is a valid, exclusively borrowed slice for `'a`,
-        // and the returned allocator holds that borrow through `PhantomData`.
-        unsafe { buddy.set_state(ptr, nr_pages, base, page_size) }?;
+        // SAFETY: `descriptors` is a valid, exclusively borrowed slice for
+        // `'a`, and the returned allocator holds that borrow through
+        // `PhantomData`.
+        unsafe { buddy.set_state(descriptors_ptr, nr_pages, arena_base, page_size) }?;
         Ok(buddy)
     }
 
     /// A `const` placeholder for static definitions.
     ///
-    /// The placeholder manages zero pages. Until [`Buddy::init`] runs, the
+    /// The placeholder manages zero descriptors. Until [`Buddy::init`] runs, the
     /// queries report zeroes and the operations that need descriptors
     /// (`alloc_pages`, `free_pages`, `free_range`, `validate`) report
     /// [`Error::Uninitialized`]; the dangling internal pointer is never
@@ -402,12 +404,12 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         Self {
             page_size: A::ZERO,
             base_pfn: A::ZERO,
-            pages: NonNull::dangling(),
+            descriptors: NonNull::dangling(),
             nr_pages: 0,
             initialized: false,
             areas: [FreeArea::new(); NR_PAGE_ORDERS],
             nr_free: 0,
-            _pages: PhantomData,
+            _descriptors: PhantomData,
         }
     }
 
@@ -427,27 +429,27 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     ///
     /// # Safety
     ///
-    /// Same contract as [`Buddy::from_raw_parts`]: `ptr` must point to
-    /// `nr_pages` properly aligned `Page` descriptors that stay valid and
+    /// Same contract as [`Buddy::from_raw_parts`]: `descriptors` must point
+    /// to `nr_pages` properly aligned `Page` descriptors that stay valid and
     /// exclusively accessible (under the caller's synchronization) for as
     /// long as the allocator is used.
     ///
     /// # Errors
     ///
     /// [`Error::AlreadyInitialized`] if the allocator already manages
-    /// pages; otherwise the same errors as [`Buddy::new`].
+    /// descriptors; otherwise the same errors as [`Buddy::new`].
     pub unsafe fn init(
         &mut self,
-        ptr: NonNull<Page>,
+        descriptors: NonNull<Page>,
         nr_pages: usize,
-        base: A,
+        arena_base: A,
         page_size: A,
     ) -> Result<(), Error> {
         if self.is_initialized() {
             return Err(Error::AlreadyInitialized);
         }
         // SAFETY: the caller guarantees the descriptor contract.
-        unsafe { self.set_state(ptr, nr_pages, base, page_size) }
+        unsafe { self.set_state(descriptors, nr_pages, arena_base, page_size) }
     }
 
     /// Shared body of every raw initialization: validates the geometry and
@@ -455,20 +457,20 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     ///
     /// # Safety
     ///
-    /// `ptr` must point to `nr_pages` valid, properly aligned `Page`
+    /// `descriptors` must point to `nr_pages` valid, properly aligned `Page`
     /// descriptors that stay exclusively accessible for the whole call and
     /// for every later method call; see [`Buddy::from_raw_parts`].
     unsafe fn set_state(
         &mut self,
-        ptr: NonNull<Page>,
+        descriptors: NonNull<Page>,
         nr_pages: usize,
-        base: A,
+        arena_base: A,
         page_size: A,
     ) -> Result<(), Error> {
         if NR_PAGE_ORDERS == 0 || NR_PAGE_ORDERS > usize::BITS as usize {
             return Err(Error::InvalidGeometry);
         }
-        if (ptr.as_ptr() as usize) % align_of::<Page>() != 0 {
+        if (descriptors.as_ptr() as usize) % align_of::<Page>() != 0 {
             return Err(Error::InvalidPageArray);
         }
 
@@ -484,13 +486,13 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         // this rejects narrow address types whose `from_usize` saturates.
         let len = A::try_from_usize(nr_pages).ok_or(Error::InvalidGeometry)?;
 
-        // `base` must be page aligned; buddy alignment itself is computed
-        // in absolute PFN space, so it does not need the largest-block
-        // alignment the earlier implementation required.
-        if A::align_down(base, page_size) != base {
+        // `arena_base` must be page aligned; buddy alignment itself is
+        // computed in absolute PFN space, so it does not need the
+        // largest-block alignment the earlier implementation required.
+        if A::align_down(arena_base, page_size) != arena_base {
             return Err(Error::InvalidGeometry);
         }
-        let base_pfn = A::phys_to_pfn(base, page_size);
+        let base_pfn = A::phys_to_pfn(arena_base, page_size);
 
         // The managed range may not wrap around the top of the address
         // space, and the last page's address must be representable.
@@ -504,13 +506,13 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         }
 
         // SAFETY: the caller guarantees validity and exclusivity.
-        for page in unsafe { pages_mut(ptr, nr_pages) }.iter_mut() {
+        for page in unsafe { pages_mut(descriptors, nr_pages) }.iter_mut() {
             *page = Page::EMPTY;
         }
 
         self.page_size = page_size;
         self.base_pfn = base_pfn;
-        self.pages = ptr;
+        self.descriptors = descriptors;
         self.nr_pages = nr_pages;
         self.areas = [FreeArea::new(); NR_PAGE_ORDERS];
         self.nr_free = 0;
@@ -557,7 +559,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         }
     }
 
-    /// Converts a page frame number to an index into `pages`.
+    /// Converts a page frame number to an index into the descriptor array.
     ///
     /// This is the only place where `A` is narrowed to `usize`. The input
     /// is a page offset *relative to the arena base*, never an absolute
@@ -568,43 +570,43 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         if pfn < self.base_pfn {
             return Err(Error::InvalidAddress);
         }
-        let idx = (pfn - self.base_pfn)
+        let index = (pfn - self.base_pfn)
             .try_to_usize()
             .ok_or(Error::InvalidAddress)?;
-        if idx >= self.nr_pages {
+        if index >= self.nr_pages {
             return Err(Error::InvalidAddress);
         }
-        Ok(idx)
+        Ok(index)
     }
 
-    /// Converts an index into a page frame number. `idx` may be
+    /// Converts an index into a page frame number. `index` may be
     /// `nr_pages` (one past the last page).
-    fn pfn_of_index(&self, idx: usize) -> A {
-        debug_assert!(idx <= self.nr_pages);
-        self.base_pfn + A::from_usize(idx)
+    fn pfn_of_index(&self, index: usize) -> A {
+        debug_assert!(index <= self.nr_pages);
+        self.base_pfn + A::from_usize(index)
     }
 
     /// Converts an index into a physical address (`PFN_PHYS`).
-    fn addr_of_index(&self, idx: usize) -> A {
-        A::pfn_to_phys(self.pfn_of_index(idx), self.page_size)
+    fn addr_of_index(&self, index: usize) -> A {
+        A::pfn_to_phys(self.pfn_of_index(index), self.page_size)
     }
 
     /// Converts a physical address of a page start into an index.
-    fn index_of_addr(&self, addr: A) -> Result<usize, Error> {
-        if A::align_down(addr, self.page_size) != addr {
+    fn index_of_addr(&self, page_addr: A) -> Result<usize, Error> {
+        if A::align_down(page_addr, self.page_size) != page_addr {
             return Err(Error::InvalidAddress);
         }
-        self.index_of_pfn(A::phys_to_pfn(addr, self.page_size))
+        self.index_of_pfn(A::phys_to_pfn(page_addr, self.page_size))
     }
 
-    /// Returns `(buddy_idx, merged_idx)` for the block at `idx` of `order`,
+    /// Returns `(buddy_index, merged_index)` for the block at `index` of `order`,
     /// using absolute PFN alignment.
     ///
     /// Returns `None` when the buddy lies outside the arena. The arena base
     /// does not need to be aligned to the block size; alignment is computed
     /// from the absolute PFN, so small and unaligned arenas are supported.
-    fn buddy_indices(&self, idx: usize, order: u8) -> Option<(usize, usize)> {
-        let pfn = self.pfn_of_index(idx);
+    fn buddy_indices(&self, index: usize, order: u8) -> Option<(usize, usize)> {
+        let pfn = self.pfn_of_index(index);
         let block_pfn = A::from_usize(pages_in_order(order));
 
         // Buddy pairs are aligned to `2 * block_pfn`. Compute the pair start
@@ -629,12 +631,12 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             (pair_start, pair_start)
         };
 
-        let buddy_idx = self.index_of_pfn(buddy_pfn).ok()?;
-        let merged_idx = self.index_of_pfn(merged_pfn).ok()?;
-        Some((buddy_idx, merged_idx))
+        let buddy_index = self.index_of_pfn(buddy_pfn).ok()?;
+        let merged_index = self.index_of_pfn(merged_pfn).ok()?;
+        Some((buddy_index, merged_index))
     }
 
-    /// Returns `true` if `idx` lies inside a free block.
+    /// Returns `true` if `index` lies inside a free block.
     ///
     /// A page is covered by a free block of order `k` if and only if the
     /// absolute PFN rounded down to `1 << k` pages is a free head of order
@@ -643,17 +645,17 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     ///
     /// Takes the descriptor slice rather than `&self` so that callers
     /// already holding it do not construct a second, aliasing one.
-    fn is_inside_free_block(&self, pages: &[Page], idx: usize) -> bool {
-        let pfn = self.pfn_of_index(idx);
+    fn is_inside_free_block(&self, descriptors: &[Page], index: usize) -> bool {
+        let pfn = self.pfn_of_index(index);
         let max_order = (self.nr_pages.ilog2() as usize).min(Self::MAX_ORDER);
 
         for order in 0..=max_order {
             let block_pfn = A::from_usize(pages_in_order(order as u8));
             let head_pfn = A::align_down(pfn, block_pfn);
-            let Ok(head) = self.index_of_pfn(head_pfn) else {
+            let Ok(head_index) = self.index_of_pfn(head_pfn) else {
                 continue;
             };
-            let page = &pages[head];
+            let page = &descriptors[head_index];
             if page.is_free() && page.order as usize == order {
                 return true;
             }
@@ -661,29 +663,35 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         false
     }
 
-    /// Splits the block at `idx` down to `low`, adding the upper half of
+    /// Splits the block at `index` down to `low`, adding the upper half of
     /// each intermediate order to the free lists.
     ///
     /// Mirrors the kernel's `expand`. Takes the descriptor slice instead of
     /// rebuilding it, so that callers holding one never create a second,
     /// aliasing slice (Stacked Borrows forbids using the older one
     /// afterwards).
-    fn expand(&mut self, pages: &mut [Page], idx: usize, low: u8, mut high: u8) {
-        debug_assert!(high >= low);
+    fn expand(
+        &mut self,
+        descriptors: &mut [Page],
+        index: usize,
+        low_order: u8,
+        mut high_order: u8,
+    ) {
+        debug_assert!(high_order >= low_order);
 
-        while high > low {
-            high -= 1;
-            let half = pages_in_order(high);
-            let upper = idx + half;
+        while high_order > low_order {
+            high_order -= 1;
+            let half = pages_in_order(high_order);
+            let upper_index = index + half;
 
             // TODO(guard): let `set_page_guard` consume a split block for
             // CONFIG_DEBUG_PAGEALLOC/hugetlb instead of freeing it.
-            let page = &mut pages[upper];
+            let page = &mut descriptors[upper_index];
             debug_assert!(!page.is_free());
             page.flags.insert(PageFlags::BUDDY);
-            page.order = high;
+            page.order = high_order;
 
-            self.areas[high as usize].push_front(pages, upper);
+            self.areas[high_order as usize].push_front(descriptors, upper_index);
             self.nr_free += half;
         }
     }
@@ -712,31 +720,32 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         // SAFETY: `&mut self`; access to the descriptors is externally
         // synchronized, see `from_raw_parts`. The slice is built once and
         // passed down, never rebuilt while an older one is still in use.
-        let pages = unsafe { pages_mut(self.pages, self.nr_pages) };
+        let descriptors = unsafe { pages_mut(self.descriptors, self.nr_pages) };
 
         // TODO(migratetype): serve the requested migration type's list
         // first and fall back to the other lists when it is empty,
         // mirroring `__rmqueue_fallback`.
-        for current in order as usize..NR_PAGE_ORDERS {
-            let Some(idx) = self.areas[current].pop_front(pages, current) else {
+        for current_order in order as usize..NR_PAGE_ORDERS {
+            let Some(index) = self.areas[current_order].pop_front(descriptors, current_order)
+            else {
                 continue;
             };
 
-            self.nr_free -= pages_in_order(current as u8);
-            self.expand(pages, idx, order, current as u8);
+            self.nr_free -= pages_in_order(current_order as u8);
+            self.expand(descriptors, index, order, current_order as u8);
 
-            let page = &mut pages[idx];
+            let page = &mut descriptors[index];
             page.flags.remove(PageFlags::BUDDY);
             page.order = order;
             page.refcount = 1;
-            return Ok(self.addr_of_index(idx));
+            return Ok(self.addr_of_index(index));
         }
 
         Err(Error::OutOfMemory)
     }
 
-    /// Puts the block of `2^order` pages starting at `addr` back on the
-    /// free lists, coalescing it with free buddy blocks.
+    /// Puts the block of `2^order` pages starting at `block_start` back on
+    /// the free lists, coalescing it with free buddy blocks.
     ///
     /// The block must have been returned by [`Buddy::alloc_pages`] with the
     /// same order. Mirrors `__free_pages` (`put_page_testzero` plus
@@ -745,11 +754,11 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// # Errors
     ///
     /// Returns [`Error::InvalidOrder`] if `order > MAX_ORDER`.
-    /// [`Error::InvalidAddress`] if `addr` is not page aligned, denotes a
-    /// block head that is misaligned for its size, or lies outside the
-    /// managed range. [`Error::InvalidFree`] if the block is already free,
-    /// overlaps free memory, or is not in use.
-    pub fn free_pages(&mut self, addr: A, order: u8) -> Result<(), Error> {
+    /// [`Error::InvalidAddress`] if `block_start` is not page aligned,
+    /// denotes a block head that is misaligned for its size, or lies outside
+    /// the managed range. [`Error::InvalidFree`] if the block is already
+    /// free, overlaps free memory, or is not in use.
+    pub fn free_pages(&mut self, block_start: A, order: u8) -> Result<(), Error> {
         if !self.is_initialized() {
             return Err(Error::Uninitialized);
         }
@@ -757,15 +766,15 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             return Err(Error::InvalidOrder);
         }
 
-        let idx = self.index_of_addr(addr)?;
+        let index = self.index_of_addr(block_start)?;
         let block = pages_in_order(order);
-        let end = idx.checked_add(block).ok_or(Error::InvalidAddress)?;
+        let end = index.checked_add(block).ok_or(Error::InvalidAddress)?;
         if end > self.nr_pages {
             return Err(Error::InvalidAddress);
         }
         // The block must be naturally aligned in absolute PFN space, not
         // merely in index space.
-        let pfn = A::phys_to_pfn(addr, self.page_size);
+        let pfn = A::phys_to_pfn(block_start, self.page_size);
         let block_pfn = A::from_usize(block);
         if A::align_down(pfn, block_pfn) != pfn {
             return Err(Error::InvalidAddress);
@@ -773,8 +782,8 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
         // SAFETY: `&mut self`; access to the descriptors is externally
         // synchronized, see `from_raw_parts`.
-        let pages = unsafe { pages_mut(self.pages, self.nr_pages) };
-        let page = &mut pages[idx];
+        let descriptors = unsafe { pages_mut(self.descriptors, self.nr_pages) };
+        let page = &mut descriptors[index];
         if page.is_free() || page.refcount != 1 {
             return Err(Error::InvalidFree);
         }
@@ -783,7 +792,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         }
         page.refcount = 0;
 
-        self.free_one_page(pages, idx, order)
+        self.free_one_page(descriptors, index, order)
     }
 
     /// Frees `[start, end)`, splitting it into the largest naturally
@@ -811,8 +820,8 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             return Ok(());
         }
 
-        let mut idx = self.index_of_pfn(start_pfn)?;
-        let end_idx = if end_pfn == end_limit {
+        let mut index = self.index_of_pfn(start_pfn)?;
+        let end_index = if end_pfn == end_limit {
             self.nr_pages
         } else {
             self.index_of_pfn(end_pfn)?
@@ -820,11 +829,11 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
         // SAFETY: `&mut self`; access to the descriptors is externally
         // synchronized, see `from_raw_parts`.
-        let pages = unsafe { pages_mut(self.pages, self.nr_pages) };
+        let descriptors = unsafe { pages_mut(self.descriptors, self.nr_pages) };
 
-        while idx < end_idx {
-            let remaining = end_idx - idx;
-            let pfn = self.pfn_of_index(idx);
+        while index < end_index {
+            let remaining = end_index - index;
+            let pfn = self.pfn_of_index(index);
             let mut order = 0u32;
             let max_order = Self::MAX_ORDER as u32;
             while order < max_order {
@@ -836,8 +845,8 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             }
             debug_assert!(pages_in_order(order as u8) <= remaining);
 
-            self.free_one_page(pages, idx, order as u8)?;
-            idx += pages_in_order(order as u8);
+            self.free_one_page(descriptors, index, order as u8)?;
+            index += pages_in_order(order as u8);
         }
 
         Ok(())
@@ -862,8 +871,8 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
     /// use the_buddy_system::Buddy;
     /// use the_buddy_system::Page;
     ///
-    /// let mut pages = [Page::EMPTY; 64];
-    /// let mut buddy = Buddy::<usize, 4>::new(0, 0x1000, &mut pages).unwrap();
+    /// let mut descriptors = [Page::EMPTY; 64];
+    /// let mut buddy = Buddy::<usize, 4>::new(0, 0x1000, &mut descriptors).unwrap();
     ///
     /// buddy.free_ranges([(0usize, 0x10_000)]).unwrap();
     /// assert_eq!(buddy.nr_free(), 16);
@@ -878,41 +887,48 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         Ok(())
     }
 
-    /// Adds the block at `idx` to the free lists, merging with free
+    /// Adds the block at `index` to the free lists, merging with free
     /// buddies until no larger block can be formed.
     ///
     /// Mirrors the kernel's `__free_one_page`. The caller must have
     /// verified that the block is fully free-able.
-    fn free_one_page(&mut self, pages: &mut [Page], idx: usize, order: u8) -> Result<(), Error> {
+    fn free_one_page(
+        &mut self,
+        descriptors: &mut [Page],
+        index: usize,
+        order: u8,
+    ) -> Result<(), Error> {
         debug_assert!(
-            A::align_down(self.pfn_of_index(idx), A::from_usize(pages_in_order(order)))
-                == self.pfn_of_index(idx)
+            A::align_down(
+                self.pfn_of_index(index),
+                A::from_usize(pages_in_order(order))
+            ) == self.pfn_of_index(index)
         );
 
-        if self.is_inside_free_block(pages, idx) {
+        if self.is_inside_free_block(descriptors, index) {
             return Err(Error::InvalidFree);
         }
-        if pages[idx].refcount != 0 {
+        if descriptors[index].refcount != 0 {
             return Err(Error::InvalidFree);
         }
 
-        let mut idx = idx;
+        let mut index = index;
         let mut order = order;
         while (order as usize) < Self::MAX_ORDER {
             // TODO(bitmap): consult the per-order buddy bitmap first, as
             // `buddy_merge_likely` does, to avoid touching a cache-cold
             // buddy page for every failed merge.
-            let Some((buddy, merged)) = self.buddy_indices(idx, order) else {
+            let Some((buddy_index, merged_index)) = self.buddy_indices(index, order) else {
                 break;
             };
-            let page = &pages[buddy];
+            let page = &descriptors[buddy_index];
             if !page.is_free() || page.order != order {
                 break;
             }
 
-            self.areas[order as usize].remove(pages, buddy);
+            self.areas[order as usize].remove(descriptors, buddy_index);
             self.nr_free -= pages_in_order(order);
-            idx = merged;
+            index = merged_index;
             order += 1;
         }
 
@@ -920,10 +936,10 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
         // buddy is likely free, mirroring `buddy_merge_likely` and
         // `add_to_free_list_tail`; this keeps large blocks mergeable and
         // reduces fragmentation.
-        let page = &mut pages[idx];
+        let page = &mut descriptors[index];
         page.flags.insert(PageFlags::BUDDY);
         page.order = order;
-        self.areas[order as usize].push_front(pages, idx);
+        self.areas[order as usize].push_front(descriptors, index);
         self.nr_free += pages_in_order(order);
         Ok(())
     }
@@ -950,27 +966,27 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
 
         // SAFETY: read-only access to the descriptors; the caller must
         // serialize against writers (see `from_raw_parts`).
-        let pages = unsafe { pages_ref(self.pages, self.nr_pages) };
+        let descriptors = unsafe { pages_ref(self.descriptors, self.nr_pages) };
 
         for order in 0..NR_PAGE_ORDERS {
             let block = pages_in_order(order as u8);
             let mut count = 0usize;
 
-            for idx in self.areas[order].iter(pages) {
+            for index in self.areas[order].iter(descriptors) {
                 count += 1;
                 // A cycle in a corrupted list would otherwise loop forever.
                 if count > self.nr_pages {
                     return Err(Error::CorruptFreeList);
                 }
-                if block > self.nr_pages || idx > self.nr_pages - block {
+                if block > self.nr_pages || index > self.nr_pages - block {
                     return Err(Error::CorruptFreeList);
                 }
-                let pfn = self.pfn_of_index(idx);
+                let pfn = self.pfn_of_index(index);
                 let block_pfn = A::from_usize(block);
                 if A::align_down(pfn, block_pfn) != pfn {
                     return Err(Error::CorruptFreeList);
                 }
-                let page = &pages[idx];
+                let page = &descriptors[index];
                 if !page.is_free() || page.order as usize != order || page.refcount != 0 {
                     return Err(Error::CorruptFreeList);
                 }
@@ -985,9 +1001,9 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             // Two free buddies at `order` would have been coalesced into
             // `order + 1`, so they cannot exist below the largest order.
             if order + 1 < NR_PAGE_ORDERS {
-                for idx in self.areas[order].iter(pages) {
-                    if let Some((buddy, _)) = self.buddy_indices(idx, order as u8) {
-                        let page = &pages[buddy];
+                for index in self.areas[order].iter(descriptors) {
+                    if let Some((buddy_index, _)) = self.buddy_indices(index, order as u8) {
+                        let page = &descriptors[buddy_index];
                         if page.is_free() && page.order as usize == order {
                             return Err(Error::Uncoalesced);
                         }
@@ -1000,7 +1016,7 @@ impl<'a, A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'a, A, NR_PAGE_ORDERS>
             return Err(Error::CountMismatch);
         }
 
-        let flagged = pages.iter().filter(|page| page.is_free()).count();
+        let flagged = descriptors.iter().filter(|page| page.is_free()).count();
         if flagged != listed_heads {
             return Err(Error::CorruptFreeList);
         }
@@ -1024,10 +1040,10 @@ impl<A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'static, A, NR_PAGE_ORDERS
     ///
     /// # Safety
     ///
-    /// - `ptr` must point to `nr_pages` properly aligned `Page` descriptors
-    ///   that stay valid for reads and writes for as long as the allocator
-    ///   (or anything derived from it) is used; the kernel's `vmemmap`
-    ///   satisfies this by construction.
+    /// - `descriptors` must point to `nr_pages` properly aligned `Page`
+    ///   descriptors that stay valid for reads and writes for as long as the
+    ///   allocator (or anything derived from it) is used; the kernel's
+    ///   `vmemmap` satisfies this by construction.
     /// - The descriptors must not be reached through any other alias while
     ///   a method runs. This crate never synchronizes internally
     ///   (`alloc_pages`/`free_pages`/... take `&mut self`, the queries take
@@ -1035,22 +1051,22 @@ impl<A: PageFrame, const NR_PAGE_ORDERS: usize> Buddy<'static, A, NR_PAGE_ORDERS
     ///   the allocator in a spin lock that also guards every other user of
     ///   the array.
     /// - The geometry rules of [`Buddy::new`] must hold for `nr_pages` and
-    ///   `base`.
+    ///   `arena_base`.
     ///
     /// # Errors
     ///
-    /// Same as [`Buddy::new`], plus [`Error::InvalidPageArray`] if `ptr` is
-    /// not aligned to `Page`.
+    /// Same as [`Buddy::new`], plus [`Error::InvalidPageArray`] if
+    /// `descriptors` is not aligned to `Page`.
     pub unsafe fn from_raw_parts(
-        ptr: NonNull<Page>,
+        descriptors: NonNull<Page>,
         nr_pages: usize,
-        base: A,
+        arena_base: A,
         page_size: A,
     ) -> Result<Self, Error> {
         let mut buddy = Self::uninit();
         // SAFETY: the caller guarantees validity, lifetime and exclusive
         // access to the descriptor array.
-        unsafe { buddy.set_state(ptr, nr_pages, base, page_size) }?;
+        unsafe { buddy.set_state(descriptors, nr_pages, arena_base, page_size) }?;
         Ok(buddy)
     }
 }
@@ -1094,10 +1110,7 @@ mod tests {
         // No operation may touch the dangling descriptor pointer.
         let mut buddy = Buddy::<usize, NR_PAGE_ORDERS>::uninit();
         assert!(matches!(buddy.alloc_pages(0), Err(Error::Uninitialized)));
-        assert!(matches!(
-            buddy.free_pages(0, 0),
-            Err(Error::Uninitialized)
-        ));
+        assert!(matches!(buddy.free_pages(0, 0), Err(Error::Uninitialized)));
         assert!(matches!(
             buddy.free_range(0, PAGES * PS),
             Err(Error::Uninitialized)
@@ -1288,9 +1301,7 @@ mod tests {
         let mut pages = [Page::EMPTY; PAGES];
         let mut buddy = arena(&mut pages);
 
-        buddy
-            .free_ranges([(0usize, PS), (2 * PS, 4 * PS)])
-            .unwrap();
+        buddy.free_ranges([(0usize, PS), (2 * PS, 4 * PS)]).unwrap();
         assert_eq!(buddy.nr_free(), 3);
         assert_eq!(buddy.nr_free_blocks(0), Some(1));
         assert_eq!(buddy.nr_free_blocks(1), Some(1));
@@ -1364,7 +1375,7 @@ mod tests {
         assert_eq!(buddy.nr_free(), 0);
 
         addrs.sort_unstable();
-        let expected: Vec<usize> = (0..PAGES).map(|idx| idx * PS).collect();
+        let expected: Vec<usize> = (0..PAGES).map(|index| index * PS).collect();
         assert_eq!(addrs, expected);
 
         for addr in addrs.into_iter().rev() {
@@ -1454,14 +1465,11 @@ mod tests {
         // Mark a page free without linking it into any list.
         {
             // SAFETY: the descriptor array is owned by this test.
-            let pages = unsafe { pages_mut(buddy.pages, buddy.nr_pages) };
+            let pages = unsafe { pages_mut(buddy.descriptors, buddy.nr_pages) };
             pages[8].flags.insert(PageFlags::BUDDY);
             pages[8].order = 5;
         }
-        assert!(matches!(
-            buddy.validate(),
-            Err(Error::CorruptFreeList)
-        ));
+        assert!(matches!(buddy.validate(), Err(Error::CorruptFreeList)));
     }
 
     #[test]
@@ -1472,12 +1480,12 @@ mod tests {
         // Hand-build two free order-2 buddies that should have merged.
         {
             // SAFETY: the descriptor array is owned by this test.
-            let pages = unsafe { pages_mut(buddy.pages, buddy.nr_pages) };
-            for idx in [0usize, 4] {
-                let page = &mut pages[idx];
+            let pages = unsafe { pages_mut(buddy.descriptors, buddy.nr_pages) };
+            for index in [0usize, 4] {
+                let page = &mut pages[index];
                 page.flags.insert(PageFlags::BUDDY);
                 page.order = 2;
-                buddy.areas[2].push_front(pages, idx);
+                buddy.areas[2].push_front(pages, index);
             }
         }
         assert!(matches!(buddy.validate(), Err(Error::Uncoalesced)));
