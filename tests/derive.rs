@@ -10,11 +10,11 @@ use the_buddy_system::PhysAddr;
 
 const PS: u64 = 0x1000;
 
-#[derive(PageFrame)]
+#[derive(PageFrame, Debug)]
 #[repr(transparent)]
 struct Addr(u64);
 
-#[derive(PageFrame)]
+#[derive(PageFrame, Debug)]
 struct UsizeAddr(usize);
 
 #[test]
@@ -64,9 +64,6 @@ fn derived_supertrait_impls() {
     // Add + Sub.
     assert_eq!(Addr(1) + Addr(2), Addr(3));
     assert_eq!(Addr(3) - Addr(1), Addr(2));
-
-    // Debug.
-    assert_eq!(format!("{:?}", Addr(5)), "Addr(5)");
 }
 
 #[test]

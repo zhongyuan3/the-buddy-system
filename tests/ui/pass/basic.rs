@@ -13,5 +13,4 @@ fn main() {
     let addr = buddy.alloc_pages(2).unwrap();
     assert_eq!(addr.0 % (4 * 0x1000), 0);
     buddy.free_pages(addr, 2).unwrap();
-    assert_eq!(format!("{:?}", Addr(5)), "Addr(5)");
 }

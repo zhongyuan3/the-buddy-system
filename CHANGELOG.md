@@ -10,7 +10,9 @@ All notable changes to this project are documented in this file.
   `PageFlags`, `FreeArea`, `FreeList`, `Link` and `FreeListIter` no longer
   implement `Debug`; only `Error` keeps it. Internal assertions and tests
   compare values directly instead of formatting them. This is a breaking
-  change for code that relied on the derived formatting.
+  change for code that relied on the derived formatting. The `PageFrame`
+  derive macro no longer generates `Debug` either; add it to the derive list
+  explicitly if needed.
 - **Flattened the module layout.** Public items are exported only from the
   crate root. The `error`, `order` and `pfn` modules were removed: `Error`
   lives in `buddy.rs`, the order helpers live in `page.rs`, and

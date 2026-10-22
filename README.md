@@ -72,7 +72,9 @@ can wrap a primitive in your own type with the `#[derive(PageFrame)]`
 macro. The derive transparently forwards all address arithmetic, the
 physical-address ↔ PFN conversions and the `usize` index conversions to the
 inner type, and also implements the shared `the_mm_core::PhysAddr`
-supertrait, so the wrapper works with `Memblock` and `the-slab` as well:
+supertrait, so the wrapper works with `Memblock` and `the-slab` as well.
+`Debug` is not generated; add it to the derive list if you need to format the
+address type:
 
 ```rust
 use the_buddy_system::Buddy;
