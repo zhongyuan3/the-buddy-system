@@ -27,7 +27,7 @@ use crate::page::Page;
 /// The bias gives the type a niche so that `Option<Link>` is exactly one
 /// machine word wide. This replaces the C-style `NULL` sentinel while
 /// keeping the page descriptor as compact as with a raw index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Link(NonZeroUsize);
 
 impl Link {
@@ -50,7 +50,7 @@ impl Link {
 }
 
 /// The head of a circular doubly linked list of page indices.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FreeList {
     head: Option<Link>,
 }
@@ -121,7 +121,7 @@ impl FreeList {
         let prev = descriptors[index].prev.expect("removed node is linked");
 
         if next == link {
-            debug_assert_eq!(self.head, Some(link));
+            debug_assert!(self.head == Some(link));
             self.head = None;
         } else {
             descriptors[next.index()].prev = Some(prev);
@@ -154,7 +154,7 @@ impl FreeList {
 }
 
 /// Iterator over the page indices of a [`FreeList`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) struct FreeListIter<'p> {
     descriptors: &'p [Page],
     head: Option<Link>,
@@ -292,8 +292,8 @@ mod tests {
         list.remove(&mut pages, 1);
         assert!(pages[1].next.is_none());
         assert!(pages[1].prev.is_none());
-        assert_eq!(pages[2].next, Some(Link::new(2)));
-        assert_eq!(pages[2].prev, Some(Link::new(2)));
+        assert!(pages[2].next == Some(Link::new(2)));
+        assert!(pages[2].prev == Some(Link::new(2)));
     }
 
     #[test]

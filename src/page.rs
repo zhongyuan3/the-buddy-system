@@ -8,7 +8,7 @@ bitflags! {
     /// Per-page flags, modeled after the kernel's `PG_*` flags
     /// (`include/linux/page-flags.h`).
     #[repr(transparent)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     pub struct PageFlags: u8 {
         /// The page is the head of a block currently on a free list
         /// (mirrors `PG_buddy` / `PageBuddy`).
@@ -39,7 +39,7 @@ bitflags! {
 /// `lru`, `PG_*` flags beyond `BUDDY`, ...) as the slab, page cache and
 /// rmap layers need them; keep the buddy fields first so the hot paths
 /// stay compact.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Page {
     pub(crate) flags: PageFlags,
     pub(crate) order: u8,
@@ -122,12 +122,12 @@ mod tests {
     #[test]
     fn empty_page_is_pristine() {
         let page = Page::EMPTY;
-        assert_eq!(page.flags(), PageFlags::empty());
+        assert!(page.flags() == PageFlags::empty());
         assert_eq!(page.order(), 0);
         assert_eq!(page.refcount(), 0);
         assert!(!page.is_free());
-        assert_eq!(page, Page::new());
-        assert_eq!(page, Page::default());
+        assert!(page == Page::new());
+        assert!(page == Page::default());
     }
 
     #[test]
@@ -146,11 +146,11 @@ mod tests {
     fn page_is_copy_and_eq() {
         let a = Page::EMPTY;
         let b = a;
-        assert_eq!(a, b);
+        assert!(a == b);
 
         let mut c = Page::EMPTY;
         c.refcount = 1;
-        assert_ne!(a, c);
+        assert!(a != c);
     }
 
     #[test]

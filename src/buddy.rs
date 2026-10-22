@@ -103,7 +103,7 @@ impl core::error::Error for Error {}
 /// later only turns `free_list` into an array and requires a migration type
 /// argument in the allocator, exactly like `migratetype` in
 /// `__rmqueue_smallest`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FreeArea {
     // TODO(migratetype): split into `free_list: [FreeList; MIGRATE_TYPES]`,
     // one list per migration type, exactly like the kernel's
@@ -266,7 +266,6 @@ fn clear_free_head(page: &mut Page) {
 /// buddy.free_pages(addr, 2).unwrap();
 /// assert_eq!(buddy.nr_free(), 64);
 /// ```
-#[derive(Debug)]
 // TODO(zone): wrap this in a zone type adding `GFP_*` flag filtering,
 // watermark checks (`__zone_watermark_ok`) and per-CPU pagesets
 // (`struct per_cpu_pages`).

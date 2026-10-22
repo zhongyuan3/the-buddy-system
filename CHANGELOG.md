@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Removed non-essential `Debug` implementations.** `Buddy`, `Page`,
+  `PageFlags`, `FreeArea`, `FreeList`, `Link` and `FreeListIter` no longer
+  implement `Debug`; only `Error` keeps it. Internal assertions and tests
+  compare values directly instead of formatting them. This is a breaking
+  change for code that relied on the derived formatting.
 - **Flattened the module layout.** Public items are exported only from the
   crate root. The `error`, `order` and `pfn` modules were removed: `Error`
   lives in `buddy.rs`, the order helpers live in `page.rs`, and
